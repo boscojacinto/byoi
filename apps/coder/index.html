@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BYOI · seat</title>
+  <link rel="manifest" href="/coder/assets/manifest.json" />
+  <link rel="stylesheet" href="/coder/assets/coder.css" />
+  <link rel="stylesheet" href="/coder/assets/vendor/xterm.css" />
+</head>
+<body>
+  <header>
+    <p class="eyebrow">vibe coder</p>
+    <h1>Sit. Same Wi-Fi. Attach.</h1>
+    <p class="lede">This phone and the seat PC share cafe Wi-Fi. Scan the slip, claim a brief, attach the seat TTY in this browser.</p>
+  </header>
+  <ol class="steps">
+    <li>Join <strong id="ssid">salon Wi-Fi</strong> — the same network as this seat PC.</li>
+    <li>Scan the check-in QR (or open this page with <code>?otp=</code> from the slip).</li>
+    <li>Claim a brief, then attach. That session is <code>tmux attach -t claude-guest</code>.</li>
+  </ol>
+  <p id="status" class="status">looking for a seat…</p>
+  <section id="session" hidden></section>
+  <section>
+    <h2>Solution board</h2>
+    <div id="board"></div>
+  </section>
+  <p>
+    <button id="unlock" type="button" disabled>Attach TTY in this browser</button>
+    <button id="done" type="button" hidden>Mark shipped</button>
+  </p>
+  <p id="rc"></p>
+  <div id="termwrap" hidden><div id="term"></div></div>
+  <script src="/coder/assets/vendor/xterm.mjs"></script>
+  <script src="/coder/assets/vendor/xterm-addon-fit.mjs"></script>
+  <script src="/coder/assets/coder.js"></script>
+</body>
+</html>

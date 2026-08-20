@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "BYOI Guest",
+    "slug": "byoi-guest",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "byoi",
+    "splash": {
+      "backgroundColor": "#f4efe4"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "cafe.byoi.guest",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "cafe.byoi.guest",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ]
+    },
+    "plugins": []
+  }
+}

@@ -1,0 +1,47 @@
+:root {
+  --paper: #f4efe4;
+  --ink: #2b2118;
+  --sage: #6b7f6a;
+  --espresso: #5c3317;
+  --foam: #fffaf3;
+  --rule: #d7cbb8;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Iowan Old Style", Palatino, Georgia, serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+.mast {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  padding: 1.5rem 2rem 1rem;
+  border-bottom: 1px solid var(--rule);
+}
+.eyebrow { letter-spacing: 0.18em; text-transform: uppercase; font-size: 0.7rem; color: var(--sage); margin: 0; }
+h1 { font-weight: 500; margin: 0.2rem 0 0; font-size: 2rem; }
+.token-hint { font-size: 0.75rem; color: #7a6b5a; max-width: 16rem; }
+.grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 1.5rem; padding: 1.5rem 2rem 3rem; }
+.panel { background: var(--foam); border: 1px solid var(--rule); padding: 1.2rem; }
+h2 { font-size: 1.1rem; font-weight: 600; margin-top: 0; }
+.seats { display: grid; gap: 0.6rem; margin-bottom: 1rem; }
+.seat {
+  display: flex; justify-content: space-between; align-items: center;
+  border: 1px solid var(--rule); padding: 0.7rem 0.9rem; background: #fff;
+}
+.seat.occupied { border-color: var(--espresso); }
+.pill { font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--sage); }
+.row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+input, select, textarea, button {
+  font: inherit; padding: 0.4rem 0.55rem; border: 1px solid var(--rule); background: #fff; color: var(--ink);
+}
+textarea { width: 100%; min-height: 4.5rem; margin: 0.4rem 0; }
+button { background: var(--espresso); color: var(--foam); border: 0; cursor: pointer; }
+button:hover { filter: brightness(1.08); }
+.brief { border-top: 1px dashed var(--rule); padding: 0.7rem 0; }
+.brief h3 { margin: 0 0 0.3rem; font-size: 1rem; }
+.msg { min-height: 1.2rem; font-size: 0.85rem; }
+#slip { max-width: 280px; margin-top: 0.8rem; border: 1px solid var(--rule); }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; padding: 1rem; } }

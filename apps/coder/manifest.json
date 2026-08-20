@@ -1,0 +1,8 @@
+{
+  "name": "BYOI seat",
+  "short_name": "BYOI",
+  "start_url": "/coder",
+  "display": "standalone",
+  "background_color": "#f4efe4",
+  "theme_color": "#5c3317"
+}

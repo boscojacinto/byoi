@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BYOI salon · host</title>
+  <link rel="stylesheet" href="/host/assets/salon.css" />
+</head>
+<body>
+  <header class="mast">
+    <div>
+      <p class="eyebrow">coding + wellness</p>
+      <h1>BYOI salon</h1>
+    </div>
+    <p class="token-hint">Host token in localStorage <code>byoiHostToken</code> (default <code>byoi-host</code>)</p>
+  </header>
+  <main class="grid">
+    <section class="panel">
+      <h2>Floor</h2>
+      <div id="seats" class="seats"></div>
+      <p class="row"><button type="button" id="freeAll">Free all seats</button></p>
+      <form id="checkin" class="row">
+        <select id="seatSel" required></select>
+        <input id="coderName" placeholder="vibe coder name" required />
+        <button type="submit">Check in + print slip</button>
+      </form>
+      <p id="checkinMsg" class="msg"></p>
+      <img id="slip" alt="last slip" hidden />
+    </section>
+    <section class="panel">
+      <h2>Solution board</h2>
+      <div id="board"></div>
+      <form id="newBrief">
+        <input name="title" placeholder="brief title" required />
+        <textarea name="brief" placeholder="what shipping looks like" required></textarea>
+        <div class="row">
+          <label>session min <input type="number" name="wellness_minutes" value="90" min="15" /></label>
+          <label>break after <input type="number" name="break_after" value="50" min="10" /></label>
+          <button type="submit">Publish</button>
+        </div>
+      </form>
+    </section>
+  </main>
+  <script src="/host/assets/host.js"></script>
+</body>
+</html>

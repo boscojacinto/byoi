@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peripage-a6"
+version = "0.1.0"
+description = "Userspace Bluetooth driver for the PeriPage A6 304dpi thermal printer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "byoi" }]
+keywords = ["peripage", "thermal", "printer", "bluetooth", "a6"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Printing",
+]
+dependencies = [
+    "pillow>=10.0",
+    "qrcode>=7.4",
+    "bleak>=0.22",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27", "fastapi>=0.115", "uvicorn>=0.32"]
+salon = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "httpx>=0.27", "websockets>=13"]
+
+[project.scripts]
+peripage = "peripage_a6.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/boscojacinto/byoi"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q"
