@@ -120,8 +120,12 @@ PYTHONPATH=src:. uvicorn apps.api.main:app --host 0.0.0.0 --port 8080
 PYTHONPATH=src:. uvicorn apps.seat.main:app --host 0.0.0.0 --port 8787
 ```
 
-Then open http://127.0.0.1:8080/ on the desk, or the printed slip URL on a
-phone on the same network.
+Then `./scripts/salon-tls.sh` (private CA + host/seat certs + a non-default
+token) and open http://127.0.0.1:8080/ on the desk. The desk pushes each
+OTP to the seat over **mTLS** on `:8788`. Guests use **BYOI Guest** over
+**HTTPS** on `:8787` (same CA; seat cert SAN lists the LAN IP). Build the
+guest APK with `npx expo run:android` — Expo Go cannot trust the salon CA.
+On the seat PC, run `claude setup-token` once so guests never log in.
 
 ## What this is not
 

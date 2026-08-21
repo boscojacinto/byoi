@@ -68,12 +68,12 @@ $("unlock").addEventListener("click", async () => {
     $("rc").textContent = data.detail || "denied — stay on the same Wi-Fi as the seat PC";
     return;
   }
-  $("rc").innerHTML = `Attached via <strong>${data.via}</strong>. Same TTY as <code>${data.ssh}</code> then <code>${data.tmux}</code>.`;
+  $("rc").innerHTML = `OTP ok · attached via <strong>${data.via}</strong>. Same TTY as <code>${data.tmux}</code>.`;
   $("done").hidden = false;
-  openTerm();
+  openTerm(data.term || "/term");
 });
 
-function openTerm() {
+function openTerm(termPath) {
   const wrap = $("termwrap");
   wrap.hidden = false;
   const term = new Terminal({
@@ -87,7 +87,8 @@ function openTerm() {
   fit.fit();
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const host = location.port === "8080" ? `${location.hostname}:8787` : location.host;
-  const ws = new WebSocket(`${proto}://${host}/term`);
+  const path = termPath.startsWith("/") ? termPath : `/${termPath}`;
+  const ws = new WebSocket(`${proto}://${host}${path}`);
   termSocket = ws;
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {

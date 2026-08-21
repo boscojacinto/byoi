@@ -26,7 +26,9 @@
     fit.fit();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const host = location.port === "8080" ? location.hostname + ":8787" : location.host;
-    const ws = new WebSocket(proto + "://" + host + "/term");
+    const ticket = new URLSearchParams(location.search).get("ticket") || "";
+    const q = ticket ? "?ticket=" + encodeURIComponent(ticket) : "";
+    const ws = new WebSocket(proto + "://" + host + "/term" + q);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       ws.send(JSON.stringify({ cols: term.cols, rows: term.rows }));

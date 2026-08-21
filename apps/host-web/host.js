@@ -68,7 +68,7 @@ document.getElementById("checkin").addEventListener("submit", async (ev) => {
         coder_name: document.getElementById("coderName").value,
       }),
     });
-    msg.textContent = `slip ${data.print.mode} · join ${data.join}`;
+    msg.textContent = `seat has OTP ${data.otp} · Guest app scans the QR, or ${data.join}`;
     const img = document.getElementById("slip");
     img.src = "/last-slip.png?t=" + Date.now();
     img.hidden = false;

@@ -270,7 +270,10 @@ class Store:
         return dict(row) if row else None
 
     def session_by_otp(self, otp: str) -> dict[str, Any] | None:
-        row = self.conn.execute("SELECT * FROM sessions WHERE unlock_otp=?", (otp,)).fetchone()
+        needle = (otp or "").strip().casefold()
+        if not needle:
+            return None
+        row = self.conn.execute("SELECT * FROM sessions WHERE lower(unlock_otp)=?", (needle,)).fetchone()
         return dict(row) if row else None
 
     def set_rc_url(self, session_id: str, url: str) -> None:

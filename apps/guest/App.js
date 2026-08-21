@@ -1,177 +1,198 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Linking from "expo-linking";
 import {
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
-import { WebView } from "react-native-webview";
+  claimBrief,
+  completeSession,
+  fetchBoard,
+  joinSlip,
+  seatStatus,
+  unlockSeat,
+} from "./api";
+import Constants from "expo-constants";
+import { guessSeatBase, normalizeBase, parseJoinUrl } from "./joinUrl";
+import FloorScreen from "./screens/FloorScreen";
+import JoinScreen from "./screens/JoinScreen";
+import ScanScreen from "./screens/ScanScreen";
+import TermScreen from "./screens/TermScreen";
 
-const PAPER = "#f4efe4";
-const INK = "#2b2118";
-const ESPRESSO = "#5c3317";
-const SAGE = "#6b7f6a";
-
-function normalizeBase(raw) {
-  let s = (raw || "").trim();
-  if (!s) return "";
-  if (!/^https?:\/\//i.test(s)) s = "http://" + s;
-  return s.replace(/\/$/, "");
-}
+const LAST_SEAT = "byoi.seatBase";
 
 export default function App() {
+  const [screen, setScreen] = useState("join");
   const [host, setHost] = useState("");
   const [otp, setOtp] = useState("");
-  const [page, setPage] = useState(null);
-  const [status, setStatus] = useState("Join the same Wi-Fi as the seat PC, then enter the address from the slip.");
-  const [seat, setSeat] = useState(null);
+  const [base, setBase] = useState("");
+  const [join, setJoin] = useState(null);
+  const [status, setStatus] = useState("Same Wi-Fi as the seat PC. Scan the slip QR.");
+  const [busy, setBusy] = useState(false);
+  const [ticket, setTicket] = useState("");
 
-  const base = useMemo(() => normalizeBase(host), [host]);
+  const applyUrl = useCallback((raw) => {
+    const parsed = parseJoinUrl(raw);
+    if (!parsed) return false;
+    if (parsed.base) setHost(parsed.base + (parsed.otp ? `/join?otp=${parsed.otp}` : ""));
+    if (parsed.otp) setOtp(parsed.otp);
+    return parsed;
+  }, []);
 
-  async function probe() {
-    if (!base) {
-      setStatus("Enter the seat address from the slip (http://192.168.x.x:8787).");
-      return;
+  const sit = useCallback(
+    async (rawHost, rawOtp) => {
+      const parsed = parseJoinUrl(rawHost) || { base: normalizeBase(rawHost), otp: rawOtp };
+      const nextBase = parsed.base || normalizeBase(rawHost);
+      const nextOtp = parsed.otp || (rawOtp || "").trim();
+      if (!nextBase) {
+        setStatus("Scan the slip QR, or paste the join URL from the host desk.");
+        return;
+      }
+      setBusy(true);
+      setStatus("reaching the seat…");
+      try {
+        await seatStatus(nextBase);
+        await AsyncStorage.setItem(LAST_SEAT, nextBase);
+        setBase(nextBase);
+        setOtp(nextOtp);
+        if (nextOtp) {
+          const data = await joinSlip(nextBase, nextOtp);
+          setJoin({
+            ...data,
+            board: data.board || [],
+            item: data.item || null,
+          });
+          setStatus(`${data.seat?.name || "Seat"} · hello ${data.session?.coder_name || ""}`);
+        } else {
+          const board = await fetchBoard(nextBase);
+          setJoin({ session: null, seat: null, board, wifi_ssid: null });
+          setStatus("Seat is up. Scan the slip QR to unlock your session.");
+        }
+        setScreen("floor");
+      } catch (err) {
+        setStatus(err.message || "Cannot reach the seat. Same Wi-Fi? Seat agent on :8787?");
+        setScreen("join");
+      } finally {
+        setBusy(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    (async () => {
+      const saved = await AsyncStorage.getItem(LAST_SEAT);
+      setHost(saved || guessSeatBase(Constants));
+    })();
+  }, []);
+
+  useEffect(() => {
+    function onUrl({ url }) {
+      const parsed = applyUrl(url);
+      if (parsed?.base) sit(parsed.base, parsed.otp);
     }
+    Linking.getInitialURL().then((url) => {
+      if (url && !url.startsWith("exp://")) onUrl({ url });
+    });
+    const sub = Linking.addEventListener("url", onUrl);
+    return () => sub.remove();
+  }, [applyUrl, sit]);
+
+  async function onClaim(boardId) {
+    if (!join?.session) return;
+    setBusy(true);
     try {
-      const res = await fetch(`${base}/local/status`);
-      const data = await res.json();
-      setSeat(data);
-      setStatus(`${data.name || "Seat"} up · ${data.tmux || "tmux"}`);
-    } catch {
-      setSeat(null);
-      setStatus("Cannot reach the seat. Same Wi-Fi? Is the seat agent on :8787?");
+      const data = await claimBrief(base, join.session.id, boardId);
+      setJoin((prev) => ({
+        ...prev,
+        session: data.session || prev.session,
+        item: data.item || prev.item,
+      }));
+      setStatus("brief claimed · attach the TTY");
+    } catch (err) {
+      setStatus(err.message);
+    } finally {
+      setBusy(false);
     }
   }
 
-  if (page && base) {
-    const path =
-      page === "tty" ? "/tty" : `/coder${otp ? `?otp=${encodeURIComponent(otp)}` : ""}`;
+  async function onAttach() {
+    setBusy(true);
+    try {
+      const data = await unlockSeat(base, otp, join?.session?.id);
+      setTicket(data.ticket || "");
+      setScreen("term");
+    } catch (err) {
+      setStatus(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onShipped() {
+    if (!join?.session) return;
+    setBusy(true);
+    try {
+      await completeSession(base, join.session.id);
+      setStatus("shipped. leave the seat.");
+      setJoin((prev) => ({ ...prev, session: { ...prev.session, status: "done" } }));
+    } catch (err) {
+      setStatus(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (screen === "scan") {
     return (
-      <View style={{ flex: 1, backgroundColor: PAPER }}>
-        <StatusBar barStyle="dark-content" backgroundColor={PAPER} />
-        <SafeAreaView style={styles.safe}>
-          <Pressable style={styles.btnGhost} onPress={() => setPage(null)}>
-            <Text style={styles.btnGhostText}>Close seat</Text>
-          </Pressable>
-          <WebView
-            source={{ uri: `${base}${path}` }}
-            originWhitelist={["*"]}
-            style={{ flex: 1, backgroundColor: PAPER }}
-          />
-        </SafeAreaView>
-      </View>
+      <ScanScreen
+        onCancel={() => setScreen("join")}
+        onCode={(data) => {
+          const parsed = applyUrl(data);
+          if (!parsed?.base) {
+            setStatus("That QR is not a BYOI join link.");
+            setScreen("join");
+            return;
+          }
+          setScreen("join");
+          sit(parsed.base, parsed.otp);
+        }}
+      />
+    );
+  }
+
+  if (screen === "term" && base) {
+    return <TermScreen base={base} ticket={ticket} onClose={() => setScreen("floor")} />;
+  }
+
+  if (screen === "floor") {
+    return (
+      <FloorScreen
+        join={join}
+        status={status}
+        busy={busy}
+        onClaim={onClaim}
+        onAttach={onAttach}
+        onShipped={onShipped}
+        onLeave={() => {
+          setScreen("join");
+          setStatus("Left the seat. Scan again to sit.");
+        }}
+      />
     );
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: PAPER }}>
-      <StatusBar barStyle="dark-content" backgroundColor={PAPER} />
-      <SafeAreaView style={styles.safe}>
-        <ScrollView contentContainerStyle={{ paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
-          <Text style={styles.eyebrow}>BYOI guest</Text>
-          <Text style={styles.title}>Sit. Same Wi-Fi. Attach.</Text>
-          <Text style={styles.lede}>
-            This phone and the seat PC are on the same Wi-Fi. Scan the slip QR in
-            the camera app, or type the seat address here. No Bluetooth, no
-            Claude Remote Control.
-          </Text>
-
-          <View style={styles.card}>
-            <Text style={styles.step}>1. Join the cafe Wi-Fi printed on the slip.</Text>
-            <Text style={styles.step}>2. Scan the QR, or enter the seat host below.</Text>
-            <Text style={styles.step}>3. Open the board or the TTY — that is tmux claude-guest.</Text>
-          </View>
-
-          <Text style={styles.label}>Seat address</Text>
-          <TextInput
-            style={styles.input}
-            value={host}
-            onChangeText={setHost}
-            placeholder="http://192.168.x.x:8787"
-            placeholderTextColor="#9a8b7a"
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-          />
-          <Text style={styles.label}>OTP (optional)</Text>
-          <TextInput
-            style={styles.input}
-            value={otp}
-            onChangeText={setOtp}
-            placeholder="from the slip"
-            placeholderTextColor="#9a8b7a"
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-
-          <Text style={styles.status}>{status}</Text>
-          {seat?.ssh ? <Text style={styles.mono}>{seat.ssh}</Text> : null}
-
-          <Pressable style={styles.btn} onPress={probe}>
-            <Text style={styles.btnText}>Find seat</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.btn, !base && styles.btnDisabled]}
-            onPress={() => base && setPage("board")}
-          >
-            <Text style={styles.btnText}>Open seat</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.btnGhost, !base && styles.btnDisabled]}
-            onPress={() => base && setPage("tty")}
-          >
-            <Text style={styles.btnGhostText}>Terminal only</Text>
-          </Pressable>
-        </ScrollView>
-      </SafeAreaView>
-    </View>
+    <JoinScreen
+      host={host}
+      otp={otp}
+      status={status}
+      busy={busy}
+      onChangeHost={(text) => {
+        setHost(text);
+        const parsed = parseJoinUrl(text);
+        if (parsed?.otp) setOtp(parsed.otp);
+      }}
+      onChangeOtp={setOtp}
+      onScan={() => setScreen("scan")}
+      onSit={() => sit(host, otp)}
+    />
   );
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: PAPER, padding: 22 },
-  eyebrow: {
-    letterSpacing: 2,
-    textTransform: "uppercase",
-    color: SAGE,
-    fontSize: 12,
-    marginTop: 12,
-  },
-  title: { fontSize: 32, color: INK, marginTop: 6, fontWeight: "500" },
-  lede: { color: "#5a4c3e", marginTop: 8, lineHeight: 22, fontSize: 16 },
-  card: {
-    marginTop: 22,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#d7cbb8",
-    backgroundColor: "#fffaf3",
-  },
-  step: { color: INK, marginBottom: 8, lineHeight: 20 },
-  label: { color: ESPRESSO, fontWeight: "600", marginTop: 16, marginBottom: 6 },
-  input: {
-    borderWidth: 1,
-    borderColor: "#d7cbb8",
-    backgroundColor: "#fffaf3",
-    color: INK,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    fontSize: 15,
-  },
-  mono: { fontFamily: "monospace", color: INK, lineHeight: 20, fontSize: 13, marginTop: 8 },
-  status: { marginTop: 16, color: SAGE, lineHeight: 20 },
-  btn: {
-    marginTop: 14,
-    backgroundColor: ESPRESSO,
-    paddingVertical: 14,
-    alignItems: "center",
-  },
-  btnDisabled: { opacity: 0.4 },
-  btnText: { color: "#fffaf3", fontSize: 16 },
-  btnGhost: { marginTop: 10, paddingVertical: 12, alignItems: "center" },
-  btnGhostText: { color: ESPRESSO, fontSize: 15 },
-});

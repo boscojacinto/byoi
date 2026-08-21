@@ -14,4 +14,5 @@ htmlcov/
 data/
 apps/guest/node_modules/
 apps/guest/.expo/
+apps/guest/assets/ca.pem
 .DS_Store

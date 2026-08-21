@@ -25,9 +25,19 @@
       "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",
-        "ACCESS_NETWORK_STATE"
+        "ACCESS_NETWORK_STATE",
+        "CAMERA"
       ]
     },
-    "plugins": []
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Scan the salon check-in slip to sit at a seat.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "./plugins/withByoiCa"
+    ]
   }
 }

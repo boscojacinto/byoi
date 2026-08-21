@@ -1,4 +1,4 @@
-"""Seat agent: cafe Wi-Fi TTY. Phone and this PC share a LAN."""
+"""Seat agent: cafe Wi-Fi TTY, OTP-gated tmux attach."""
 
 from __future__ import annotations
 
@@ -12,10 +12,11 @@ from urllib.parse import urljoin
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .gate import gate
 from .pty_ws import attach_tmux
 from .tmux_claude import SESSION, ensure_session
 
@@ -24,7 +25,7 @@ LAN_CIDR = os.environ.get("BYOI_LAN_CIDR", "")
 SEAT_ID = os.environ.get("BYOI_SEAT_ID", "seat-1")
 SEAT_NAME = os.environ.get("BYOI_SEAT_NAME", "Seat 1")
 HOUSE = os.environ.get("BYOI_HOUSE_URL", "http://127.0.0.1:8080")
-UNLOCK_OPEN = os.environ.get("BYOI_UNLOCK_OPEN", "1") == "1"
+UNLOCK_OPEN = os.environ.get("BYOI_UNLOCK_OPEN", "0") == "1"
 GUEST_USER = os.environ.get("BYOI_GUEST_USER", "guest")
 ROOT = Path(__file__).resolve().parents[2]
 CODER = ROOT / "apps" / "coder"
@@ -45,6 +46,8 @@ def client_allowed(host: str | None, *, lan_cidr: str = LAN_CIDR) -> bool:
     """True for the seat itself and phones on the same private Wi-Fi."""
     if not host:
         return False
+    if host in {"testclient", "localhost", "localhost.localdomain"}:
+        return True
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -68,17 +71,24 @@ def _want_rfcomm() -> bool:
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
+    from apps.tls import paths as tls_paths
+
+    from .control_server import spawn_control_task
+
     if _want_rfcomm():
         from .rfcomm_tty import start_rfcomm
 
         start_rfcomm()
-    yield
+    control = spawn_control_task()
+    _state["control_tls"] = bool(control) or tls_paths().seat_ready()
+    try:
+        yield
+    finally:
+        if control:
+            server, task = control
+            server.should_exit = True
+            await task
 
-
-app = FastAPI(title=f"BYOI {SEAT_NAME}", lifespan=_lifespan)
-if CODER.is_dir():
-    app.mount("/coder/assets", StaticFiles(directory=CODER), name="coder-assets")
-    app.mount("/assets", StaticFiles(directory=CODER), name="coder-assets-short")
 
 _state = {
     "seat_id": SEAT_ID,
@@ -87,7 +97,13 @@ _state = {
     "tmux": SESSION,
     "claude": "idle",
     "last_unlock": None,
+    "control_tls": False,
 }
+
+app = FastAPI(title=f"BYOI {SEAT_NAME}", lifespan=_lifespan)
+if CODER.is_dir():
+    app.mount("/coder/assets", StaticFiles(directory=CODER), name="coder-assets")
+    app.mount("/assets", StaticFiles(directory=CODER), name="coder-assets-short")
 
 
 def _request_host(request: Request) -> str:
@@ -111,6 +127,16 @@ def root(otp: str | None = None) -> RedirectResponse:
     return RedirectResponse(url=f"/coder{q}")
 
 
+@app.get("/ca.pem")
+def ca_pem() -> FileResponse:
+    from apps.tls import paths as tls_paths
+
+    ca = tls_paths().ca
+    if not ca.is_file():
+        raise HTTPException(404, "run scripts/salon-tls.sh")
+    return FileResponse(ca, media_type="application/x-pem-file", filename="byoi-ca.pem")
+
+
 @app.get("/local/status")
 def status() -> dict:
     tmux = ensure_session()
@@ -118,9 +144,12 @@ def status() -> dict:
     out = {
         **_state,
         **tmux,
+        **gate.snapshot(),
         "ssh": _ssh_hint(),
         "lan": lan_ip(),
         "wifi": True,
+        "otp_gate": True,
+        "control_port": int(os.environ.get("BYOI_CONTROL_PORT", "8788")),
     }
     if TRANSPORT == "rfcomm":
         from .rfcomm_tty import rfcomm_status
@@ -139,6 +168,11 @@ def unlock(request: Request, body: UnlockIn | None = None) -> dict:
     host = _request_host(request)
     if not client_allowed(host) and not UNLOCK_OPEN:
         raise HTTPException(403, "join the same Wi-Fi as this seat first")
+    presented = body.otp if body else None
+    try:
+        ticket = gate.unlock(presented, open_gate=UNLOCK_OPEN)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
     tmux = ensure_session()
     _state["last_unlock"] = time.time()
     _state["claude"] = "tmux" if tmux.get("tmux") else tmux.get("error")
@@ -146,7 +180,9 @@ def unlock(request: Request, body: UnlockIn | None = None) -> dict:
         "ok": True,
         "seat_id": SEAT_ID,
         "via": _via(),
-        "term": "/term",
+        "ticket": ticket,
+        "term": f"/term?ticket={ticket}",
+        "tty": f"/tty?ticket={ticket}",
         "ssh": _ssh_hint(),
         "tmux": f"tmux attach -t {SESSION}",
         "tmux_status": tmux,
@@ -162,6 +198,10 @@ def unlock(request: Request, body: UnlockIn | None = None) -> dict:
 async def term(ws: WebSocket) -> None:
     client = ws.client.host if ws.client else ""
     if not client_allowed(client) and not UNLOCK_OPEN:
+        await ws.close(code=1008)
+        return
+    ticket = ws.query_params.get("ticket")
+    if not gate.check_ticket(ticket):
         await ws.close(code=1008)
         return
     await ws.accept()

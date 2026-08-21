@@ -3,7 +3,7 @@ from apps.api.slips import compose_checkin_slip, public_base, seat_join_url
 
 def test_public_base_rewrites_loopback_to_lan():
     url = public_base("http://127.0.0.1:8787")
-    assert url.startswith("http://")
+    assert url.startswith("https://")
     assert ":8787" in url
     assert "192.168.44.1" not in url
 
@@ -17,7 +17,7 @@ def test_seat_join_is_lan_not_bluetooth_pan():
 
 def test_seat_join_keeps_non_loopback_host():
     join = seat_join_url({"agent_url": "http://10.0.0.12:8787"}, "abcd")
-    assert join == "http://10.0.0.12:8787/join?otp=abcd"
+    assert join == "https://10.0.0.12:8787/join?otp=abcd"
 
 
 def test_checkin_slip_is_wifi_not_rfcomm():

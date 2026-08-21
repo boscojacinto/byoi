@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 from pathlib import Path
 
 import httpx
@@ -11,12 +12,15 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from apps.host_token import token_is_weak, token_matches
+
+from . import seat_sync
 from .printing import print_slip
+from .seat_sync import SeatSyncError
 from .slips import WIFI_SSID, compose_checkin_slip, public_base, public_host, seat_join_url
 from .store import Store
 
 ROOT = Path(__file__).resolve().parents[2]
-HOST_TOKEN = os.environ.get("BYOI_HOST_TOKEN", "byoi-host")
 SALON_NAME = os.environ.get("BYOI_SALON_NAME", "BYOI salon · cafe")
 HOST_WEB = ROOT / "apps" / "host-web"
 CODER_WEB = ROOT / "apps" / "coder"
@@ -48,7 +52,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         app.mount("/coder/assets", StaticFiles(directory=CODER_WEB), name="coder-assets")
 
     def require_host(authorization: str | None) -> None:
-        if authorization != f"Bearer {HOST_TOKEN}":
+        if token_is_weak():
+            raise HTTPException(503, "set a non-default BYOI_HOST_TOKEN (scripts/salon-tls.sh)")
+        if not token_matches(authorization):
             raise HTTPException(401, "host token required")
 
     @app.get("/api/health")
@@ -79,6 +85,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         seat = store.seat(body.seat_id)
         assert seat
+        try:
+            seat_sync.admit_session(seat, sess)
+        except SeatSyncError as exc:
+            store.free_seat(body.seat_id)
+            raise HTTPException(
+                502,
+                "seat did not accept the OTP — is the seat agent up on this PC?",
+            ) from exc
         join = seat_join_url(seat, sess["unlock_otp"])
         image = compose_checkin_slip(
             salon=SALON_NAME,
@@ -100,6 +114,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "ssh": f"ssh guest@{host}",
             "tmux": "tmux attach -t claude-guest",
             "print": printed,
+            "otp": sess["unlock_otp"],
+            "seat_admitted": True,
         }
 
     @app.post("/api/sessions/{session_id}/claim")
@@ -110,27 +126,40 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         return {"session": sess, "item": store.board_item(body.board_id)}
 
+    def _revoke_seat(seat: dict | None) -> None:
+        try:
+            seat_sync.revoke_session(seat)
+        except SeatSyncError as exc:
+            raise HTTPException(502, "seat did not drop the OTP") from exc
+
     @app.post("/api/seats/free-all")
     def free_all(authorization: str | None = Header(default=None)) -> dict:
         require_host(authorization)
+        seen: set[str] = set()
+        for seat in store.seats():
+            url = seat.get("agent_url") or ""
+            if url in seen:
+                continue
+            seen.add(url)
+            _revoke_seat(seat)
         return {"seats": store.free_all()}
 
     @app.post("/api/seats/{seat_id}/free")
     def free_seat(seat_id: str, authorization: str | None = Header(default=None)) -> dict:
         require_host(authorization)
-        try:
-            seat = store.free_seat(seat_id)
-        except KeyError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        return {"seat": seat}
+        seat = store.seat(seat_id)
+        if not seat:
+            raise HTTPException(404, "unknown seat")
+        _revoke_seat(seat)
+        return {"seat": store.free_seat(seat_id)}
 
     @app.post("/api/sessions/{session_id}/complete")
     def complete(session_id: str) -> dict:
-        try:
-            sess = store.complete(session_id)
-        except KeyError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        return {"session": sess}
+        sess = store.session(session_id)
+        if not sess:
+            raise HTTPException(404, "unknown session")
+        _revoke_seat(store.seat(sess["seat_id"]))
+        return {"session": store.complete(session_id)}
 
     @app.get("/api/sessions/{session_id}")
     def get_session(session_id: str) -> dict:
@@ -165,8 +194,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/local/unlock")
     async def unlock_via_seat(request: Request):
         """Forward unlock to the seat agent so the PWA can stay same-origin on :8080."""
-        seat_url = os.environ.get("BYOI_SEAT_URL", "http://127.0.0.1:8787")
-        async with httpx.AsyncClient() as client:
+        seat_url = os.environ.get("BYOI_SEAT_URL", "https://127.0.0.1:8787")
+        verify: bool | ssl.SSLContext = True
+        try:
+            from apps.tls import guest_verify_context, paths as tls_paths
+
+            if tls_paths().ca.is_file():
+                verify = guest_verify_context()
+        except (OSError, ssl.SSLError):
+            verify = True
+        async with httpx.AsyncClient(verify=verify) as client:
             proxied = await client.post(
                 f"{seat_url.rstrip('/')}/local/unlock",
                 content=await request.body(),
@@ -192,6 +229,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if index.is_file():
             return HTMLResponse(index.read_text(encoding="utf-8"))
         return HTMLResponse("<p>coder pwa missing</p>")
+
+    @app.get("/ca.pem")
+    def ca_pem() -> FileResponse:
+        from apps.tls import paths as tls_paths
+
+        ca = tls_paths().ca
+        if not ca.is_file():
+            raise HTTPException(404, "run scripts/salon-tls.sh")
+        return FileResponse(ca, media_type="application/x-pem-file", filename="byoi-ca.pem")
 
     @app.get("/last-slip.png")
     def last_slip() -> FileResponse:

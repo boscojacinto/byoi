@@ -1,43 +1,32 @@
 # BYOI Guest
 
-Android-first phone app for the vibe coder. The phone and the seat PC are
-on the **same Wi-Fi**. It does **not** use Bluetooth or Claude Remote Control.
+Android-first **app** for the vibe coder. The phone and the seat PC are on
+the **same Wi-Fi**. This is the guest interface: scan the slip, claim a
+brief, attach the seat TTY over **HTTPS**.
 
 ```
-Phone  ←── cafe Wi-Fi (HTTP / WebSocket) ──→  Seat PC :8787
+Phone app  ←── cafe Wi-Fi (HTTPS / WSS :8787) ──→  Seat PC
 ```
 
-Scan the slip QR with the camera (opens the coder PWA in the browser), or
-enter the seat address here and open the board / TTY in a WebView.
+The salon CA (`scripts/salon-tls.sh`) is copied to `assets/ca.pem`. A
+dev/APK build (`npx expo run:android`) trusts it. **Expo Go does not.**
 
-## Run
-
-Seat agent must already be up (`--host 0.0.0.0 --port 8787`).
-
-SDK 54 needs **Node ≥ 20**. This laptop’s `/usr/bin/node` is 18; Hermes Node 22 is already in `~/.local/bin`.
+## Floor APK (HTTPS)
 
 ```bash
+# from the repo root, after salon-tls.sh
 cd apps/guest
-export PATH="$HOME/.local/bin:$PATH"   # Node 22
-node -v                                  # should print v22.x
-npx expo start
-```
-
-Expo Go must be SDK 54. Open it on the **same Wi-Fi** as the seat. On the
-floor, build an APK:
-
-```bash
+export PATH="$HOME/.local/bin:$PATH"
 npx expo run:android
-# or EAS: npx eas build -p android --profile preview
 ```
 
-Android needs cleartext HTTP to the seat LAN address (already set in `app.json`).
+## Expo Go (dev only, will fail TLS)
+
+Expo Go cannot install the salon CA. Use the APK on the floor.
 
 ## Floor
 
-1. Host checks you in, prints the slip (Wi-Fi name + QR).
+1. Host checks you in, prints the slip (Wi-Fi name + HTTPS QR).
 2. Phone: join that Wi-Fi if you are not already on it.
-3. Scan the QR, or open **BYOI Guest**, type the seat URL, **Find seat**.
-4. **Open seat** (board) or **Terminal only** (same `tmux attach -t claude-guest`).
-
-SSH is the same TTY: `ssh guest@<seat-lan-ip>`.
+3. Open **BYOI Guest** → **Scan slip QR** (`https://…/join?otp=`).
+4. Claim a brief → **Attach TTY**.

@@ -42,6 +42,9 @@ def test_checkin_claim_complete_and_slip_dump(tmp_path: Path):
     assert body["print"]["mode"] == "dump"
     assert Path(body["print"]["png"]).is_file()
     assert "otp=" in body["join"]
+    assert body["otp"]
+    assert f"otp={body['otp']}" in body["join"]
+    assert body["seat_admitted"] is True
     assert "192.168.44.1" not in body["join"]
     assert "192.168.44.1" not in body["ssh"]
     assert body["ssh"].startswith("ssh guest@")

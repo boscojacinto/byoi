@@ -17,6 +17,12 @@ WIFI_SSID = os.environ.get("BYOI_WIFI_SSID", "salon Wi-Fi")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+def guest_scheme() -> str:
+    if os.environ.get("BYOI_GUEST_TLS", "1") == "0":
+        return "http"
+    return "https"
+
+
 def lan_ip() -> str:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -39,8 +45,7 @@ def public_base(url: str, default_port: int = 8787) -> str:
     port = parsed.port or default_port
     if host in LOOPBACK_HOSTS:
         host = lan_ip()
-    scheme = parsed.scheme or "http"
-    return f"{scheme}://{host}:{port}"
+    return f"{guest_scheme()}://{host}:{port}"
 
 
 def public_host(url: str, default_port: int = 8787) -> str:
@@ -95,9 +100,10 @@ def compose_checkin_slip(
     body_lines = [
         board_title or "(pick a brief at the seat)",
         f"Same Wi-Fi as this PC  {wifi_ssid}",
-        "Scan QR on your phone.",
+        "Open BYOI Guest · scan this QR",
+        f"OTP  {otp}",
         hostport,
-        "Browser TTY → tmux claude-guest",
+        "App TTY → tmux claude-guest",
         f"Session {wellness_minutes} min · break after {break_after} min",
     ]
     body = render_text("\n".join(body_lines), font_size=22, margin=12)
