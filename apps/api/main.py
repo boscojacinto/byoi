@@ -16,8 +16,10 @@ from apps.host_token import token_is_weak, token_matches
 
 from . import projects as project_ops
 from . import seat_sync
+from . import testgen
 from .printing import print_slip
 from .seat_sync import SeatSyncError
+from .testgen import TestgenError
 from .slips import WIFI_SSID, compose_checkin_slip, public_base, public_host, save_join_qr, seat_join_url
 from .store import Store
 
@@ -276,6 +278,25 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         _revoke_seat(seat)
         return {"seat": store.free_seat(seat_id)}
 
+    def _host_test_job(
+        session_id: str, seat: dict | None, *, spec: str, title: str, cwd: str | None
+    ) -> dict:
+        """Seat pins the tree to a git ref; the host generates, runs, and grades."""
+        local_ok = bool(cwd) and Path(cwd).is_dir()
+        info = seat_sync.submit_solution(
+            seat, session_id=session_id, cwd=cwd, push=not local_ok
+        )
+        ref = info.get("ref")
+        if not ref:
+            raise TestgenError("the seat did not pin a submission ref")
+        # One PC: fetch straight off the seat's repo. Two PCs: the seat pushed it.
+        source = info.get("toplevel") if local_ok else info.get("remote")
+        if not source:
+            raise TestgenError("no reachable source for the submission")
+        return testgen.run(
+            spec=spec, title=title, source=str(source), ref=str(ref), session_id=session_id
+        )
+
     def _verify_job(session_id: str, seat: dict | None, item: dict | None) -> None:
         spec = (item or {}).get("spec") or ""
         if not str(spec).strip():
@@ -285,20 +306,31 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
             return
         cwd = ((item or {}).get("project") or {}).get("local_path")
+        title = (item or {}).get("title") or ""
+        fallback_reason: str | None = None
         try:
-            report = seat_sync.verify_solution(
-                seat,
-                spec=spec,
-                title=(item or {}).get("title") or "",
-                cwd=cwd,
+            store.set_test_report(
+                session_id,
+                _host_test_job(session_id, seat, spec=spec, title=title, cwd=cwd),
             )
-        except SeatSyncError as exc:
+            return
+        except (TestgenError, SeatSyncError) as exc:
+            fallback_reason = str(exc)
+        except Exception as exc:  # never leave the phone spinning on "running"
+            fallback_reason = f"host testing failed: {exc}"
+
+        try:
+            report = seat_sync.verify_solution(seat, spec=spec, title=title, cwd=cwd)
+        except Exception as exc:
             report = {
                 "summary": str(exc),
                 "passed": 0,
                 "failed": 1,
                 "cases": [{"name": "seat verifier", "pass": False, "detail": str(exc)}],
             }
+        if fallback_reason:
+            note = f"Graded on the seat ({fallback_reason})."
+            report["summary"] = f"{note} {report.get('summary') or ''}".strip()
         store.set_test_report(session_id, report)
 
     @app.post("/api/sessions/{session_id}/complete")

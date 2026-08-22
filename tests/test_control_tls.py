@@ -94,3 +94,80 @@ def test_mtls_required_for_admit(tmp_path, monkeypatch):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_submit_requires_the_host_token(monkeypatch):
+    client = TestClient(control_app)
+    res = client.post("/local/submit", json={"session_id": "sid1"})
+    assert res.status_code == 401
+
+
+def test_submit_pins_a_ref_and_reports_the_hook(tmp_path, monkeypatch):
+    import subprocess
+
+    from apps.seat.claude_chat import session as chat_session
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    for args in (("init", "-q", "."), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+    (repo / "app.py").write_text("VALUE = 42\n")
+
+    async def fake_signal(session_id, **kwargs):
+        return {"cwd": str(repo), "transcript_path": "/t.jsonl"}
+
+    monkeypatch.setattr(chat_session, "signal_submit", fake_signal)
+    client = TestClient(control_app)
+    res = client.post(
+        "/local/submit",
+        json={"session_id": "sid1"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["hooked"] is True
+    assert body["ref"] == "refs/byoi/submissions/sid1"
+    assert body["transcript_path"] == "/t.jsonl"
+    assert body["pushed"] is False
+    listed = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", body["ref"]],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+    assert "app.py" in listed.stdout
+
+
+def test_submit_outside_a_repo_is_a_conflict(tmp_path, monkeypatch):
+    from apps.seat.claude_chat import session as chat_session
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    async def fake_signal(session_id, **kwargs):
+        return {"cwd": str(plain)}
+
+    monkeypatch.setattr(chat_session, "signal_submit", fake_signal)
+    client = TestClient(control_app)
+    res = client.post(
+        "/local/submit",
+        json={"session_id": "sid1"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.status_code == 409
+    assert "not a git repository" in res.json()["detail"]
+
+
+def test_submit_without_a_workspace_is_a_conflict(monkeypatch):
+    from apps.seat.claude_chat import session as chat_session
+
+    async def fake_signal(session_id, **kwargs):
+        return None
+
+    monkeypatch.setattr(chat_session, "signal_submit", fake_signal)
+    client = TestClient(control_app)
+    res = client.post(
+        "/local/submit",
+        json={"session_id": "sid1"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.status_code == 409
+    assert "no workspace" in res.json()["detail"]

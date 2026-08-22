@@ -194,7 +194,7 @@ async function shipped() {
       state.view = "results";
       state.testStatus = "running";
       state.testReport = null;
-      state.status = "shipped · running spec tests on the seat";
+      state.status = "shipped · building the spec test suite";
       pollTests();
     } else {
       state.status = "shipped. leave the seat.";

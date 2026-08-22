@@ -79,6 +79,26 @@ def set_workspace(seat: dict[str, Any] | None, path: str) -> dict[str, Any]:
     return res.json() if res.content else {"ok": True}
 
 
+def submit_solution(
+    seat: dict[str, Any] | None,
+    *,
+    session_id: str,
+    cwd: str | None = None,
+    push: bool = False,
+) -> dict[str, Any]:
+    """Fire the seat's submit hook and pin the guest's tree to a fetchable git ref."""
+    url = control_base(seat) + "/local/submit"
+    payload = {"session_id": session_id, "cwd": cwd, "push": push}
+    try:
+        with httpx.Client(verify=host_ssl_context(), timeout=60.0) as client:
+            res = client.post(url, json=payload, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {}
+
+
 def verify_solution(
     seat: dict[str, Any] | None,
     *,

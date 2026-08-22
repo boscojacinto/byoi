@@ -34,6 +34,21 @@ STOPFAILURE_SH = """#!/bin/sh
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cat > "$dir/last-stopfailure.json"
 """
+SUBMIT_MARK = "__byoi_submit__"
+# UserPromptSubmit has no matcher, so this runs on every guest prompt: stay cheap
+# and silent unless the seat injected the sentinel. Exit 2 erases the sentinel so
+# it never reaches the model.
+SUBMIT_SH = """#!/bin/sh
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+payload=$(cat)
+case "$payload" in
+  *__byoi_submit__*) ;;
+  *) exit 0 ;;
+esac
+printf '%s' "$payload" > "$dir/last-submit.json"
+echo "byoi: submission recorded" >&2
+exit 2
+"""
 
 
 def accounts_dir() -> Path:
@@ -148,13 +163,14 @@ class AccountPool:
         return [a.snapshot(in_use=a.label == current) for a in self.discover()]
 
     def ensure_hooks(self, account: Account) -> None:
-        """Status-line + PostCompact scripts so -p sessions dump quota/summary."""
+        """Status-line, PostCompact, and submit scripts so -p sessions dump state to disk."""
         dest = account.config_dir
         dest.mkdir(parents=True, exist_ok=True)
         scripts = {
             "byoi-statusline.sh": STATUSLINE_SH,
             "byoi-postcompact.sh": POSTCOMPACT_SH,
             "byoi-stopfailure.sh": STOPFAILURE_SH,
+            "byoi-submit.sh": SUBMIT_SH,
         }
         for name, body in scripts.items():
             path = dest / name
@@ -178,6 +194,13 @@ class AccountPool:
             {
                 "hooks": [
                     {"type": "command", "command": str(dest / "byoi-postcompact.sh")},
+                ]
+            }
+        ]
+        hooks["UserPromptSubmit"] = [
+            {
+                "hooks": [
+                    {"type": "command", "command": str(dest / "byoi-submit.sh")},
                 ]
             }
         ]
@@ -460,3 +483,32 @@ def read_handoff(session_id: str | None) -> str | None:
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
+
+
+def submit_path(config_dir: Path | None) -> Path | None:
+    if config_dir is None:
+        return None
+    return Path(config_dir) / "last-submit.json"
+
+
+def read_submit(config_dir: Path | None) -> dict[str, Any] | None:
+    """The payload byoi-submit.sh captured, or None if the hook has not fired."""
+    path = submit_path(config_dir)
+    if path is None or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_submit(config_dir: Path | None) -> None:
+    """Drop a previous guest's submission so it cannot be read as this one's."""
+    path = submit_path(config_dir)
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass

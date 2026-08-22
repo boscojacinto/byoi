@@ -1,5 +1,6 @@
 import pytest
 
+from apps.api.seat_sync import SeatSyncError
 from apps.seat.claude_chat import session as chat_session
 from apps.seat.gate import gate
 
@@ -24,6 +25,11 @@ def _seat_sync_ok(monkeypatch):
     monkeypatch.setattr("apps.api.seat_sync.admit_session", lambda *a, **k: {"ok": True})
     monkeypatch.setattr("apps.api.seat_sync.revoke_session", lambda *a, **k: {"ok": True})
     monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda *a, **k: {"ok": True})
+    def _no_submit(*a, **k):
+        # Default: no host pipeline, so _verify_job falls back to the seat verifier.
+        raise SeatSyncError(503, "seat submit stubbed off")
+
+    monkeypatch.setattr("apps.api.seat_sync.submit_solution", _no_submit)
     monkeypatch.setattr(
         "apps.api.seat_sync.verify_solution",
         lambda *a, **k: {"summary": "stub", "passed": 0, "failed": 0, "cases": []},

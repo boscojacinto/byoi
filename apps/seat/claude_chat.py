@@ -15,18 +15,22 @@ from fastapi import WebSocket, WebSocketDisconnect
 from .accounts import (
     COMPACT_CMD,
     PRIMER,
+    SUBMIT_MARK,
     Account,
     AccountPool,
+    clear_submit,
     collect_summary,
     parse_limit_error,
     preferred_label,
     quota_over_threshold,
+    read_submit,
     read_usage_file,
     write_handoff,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_BIN = os.environ.get("BYOI_CLAUDE", "claude")
+SUBMIT_SENTINEL = SUBMIT_MARK + " {session_id}"
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".pytest_cache"}
 Spawn = Callable[..., Awaitable[asyncio.subprocess.Process]]
 MODES = ("acceptEdits", "plan", "auto", "manual")
@@ -83,6 +87,13 @@ def list_workspace(rel: str = "") -> dict[str, Any]:
     if target != root:
         parent = "" if target.parent == root else str(target.parent.relative_to(root))
     return {"cwd": cwd, "parent": parent, "entries": entries}
+
+
+def submit_wait() -> float:
+    try:
+        return float(os.environ.get("BYOI_SUBMIT_WAIT", "10"))
+    except ValueError:
+        return 10.0
 
 
 def claude_argv() -> list[str]:
@@ -480,6 +491,7 @@ class ClaudeChat:
         self.workspace_path: Path | None = None
         self.account_label: str | None = None
         self.config_dir: Path | None = None
+        self._swallow_result = False
         self.quota: dict[str, Any] | None = None
         self.handoff_text: str | None = None
 
@@ -500,6 +512,7 @@ class ClaudeChat:
         return dest
 
     def assign_account(self, account: Account | None) -> None:
+        clear_submit(self.config_dir)
         self.account_label = account.label if account else None
         self.config_dir = account.config_dir if account else None
         if account is None:
@@ -556,6 +569,8 @@ class ClaudeChat:
                 pass
 
     def reset(self) -> None:
+        clear_submit(self.config_dir)
+        self._swallow_result = False
         self._stop_process()
         self._phase = "idle"
         self._history.clear()
@@ -678,6 +693,35 @@ class ClaudeChat:
         if not silent:
             await self._broadcast({"type": "status", "busy": True, "label": "Working…"})
         await self._write(encode_user(text, self.translator.session_id, pics))
+
+    async def signal_submit(self, session_id: str, *, wait: float | None = None) -> dict[str, Any] | None:
+        """Fire the UserPromptSubmit hook without starting a turn.
+
+        Deliberately not send_user(): that flips _busy and the hook exits 2, so no
+        turn-end would ever arrive to clear it and the phone would sit on "Working…".
+        """
+        if self.config_dir is None:
+            return None
+        clear_submit(self.config_dir)
+        await self.ensure()
+        if self._proc is None or self._proc.stdin is None:
+            return None
+        text = SUBMIT_SENTINEL.format(session_id=session_id or "")
+        # The hook exits 2, which still closes out a (zero-turn, zero-cost) result.
+        # Swallow it so the phone gets no phantom turn or 0-cost usage event.
+        self._swallow_result = True
+        await self._write(encode_user(text, self.translator.session_id, None))
+        if wait is None:
+            wait = submit_wait()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(wait, 0.0)
+        while True:
+            found = read_submit(self.config_dir)
+            if found is not None:
+                return found
+            if loop.time() >= deadline:
+                return None
+            await asyncio.sleep(0.1)
 
     async def interrupt(self) -> None:
         if self._proc is None or self._proc.stdin is None:
@@ -829,6 +873,13 @@ class ClaudeChat:
         )
         self._phase = "idle"
 
+    def _should_swallow(self, obj: dict[str, Any]) -> bool:
+        """Drop the zero-turn result the sentinel's blocked prompt leaves behind."""
+        if not self._swallow_result or obj.get("type") != "result":
+            return False
+        self._swallow_result = False
+        return True
+
     async def _write(self, obj: dict[str, Any]) -> None:
         if not self._proc or not self._proc.stdin:
             return
@@ -851,6 +902,8 @@ class ClaudeChat:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(obj, dict):
+                    continue
+                if self._should_swallow(obj):
                     continue
                 events = self.translator.feed(obj)
                 for event in events:

@@ -1,7 +1,10 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
+
+from apps.seat.accounts import SUBMIT_MARK
 
 from apps.seat.claude_chat import (
     GuestTranslator,
@@ -325,3 +328,165 @@ def test_switch_account_without_primer_uses_history(tmp_path, monkeypatch):
 
     chat = asyncio.run(run())
     assert "user: ship it" in (chat.handoff_text or "")
+
+
+def _fake_spawn(written: list[dict], hook_dir: Path | None = None):
+    """hook_dir: stand in for byoi-submit.sh, which fires on the sentinel."""
+
+    async def spawn(env=None):
+        class Stdin:
+            def write(self, data):
+                obj = json.loads(data.decode("utf-8"))
+                written.append(obj)
+                if hook_dir is None:
+                    return
+                text = obj.get("message", {}).get("content", [{}])[0].get("text", "")
+                if SUBMIT_MARK in text:
+                    (hook_dir / "last-submit.json").write_text(
+                        json.dumps(
+                            {"prompt": text, "cwd": "/srv/proj", "transcript_path": "/t.jsonl"}
+                        ),
+                        encoding="utf-8",
+                    )
+
+            async def drain(self):
+                return None
+
+        class Proc:
+            def __init__(self):
+                self.returncode = None
+                self.stdin = Stdin()
+                self.stdout = asyncio.StreamReader()
+                self.stderr = asyncio.StreamReader()
+
+            def kill(self):
+                self.returncode = -9
+                self.stdout.feed_eof()
+                self.stderr.feed_eof()
+
+        return Proc()
+
+    return spawn
+
+
+def test_signal_submit_returns_the_hook_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import SUBMIT_SENTINEL, ClaudeChat
+
+    pool = _pool_with_spares(tmp_path)
+    written: list[dict] = []
+
+    async def run():
+        chat = ClaudeChat(spawn=_fake_spawn(written, hook_dir=tmp_path / "a"), pool=pool)
+        chat.assign_account(pool.get("a"))
+        found = await chat.signal_submit("sid1", wait=2.0)
+        chat._stop_process()
+        return chat, found
+
+    chat, found = asyncio.run(run())
+    assert found["cwd"] == "/srv/proj"
+    text = written[-1]["message"]["content"][0]["text"]
+    assert text == SUBMIT_SENTINEL.format(session_id="sid1")
+    # The guest never sees it and the phone never goes busy.
+    assert chat._history == []
+    assert chat._busy is False
+
+
+def test_signal_submit_ignores_a_previous_guests_file(tmp_path, monkeypatch):
+    """A stale last-submit.json must not be read as this session's submission."""
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    pool = _pool_with_spares(tmp_path)
+
+    async def run():
+        chat = ClaudeChat(spawn=_fake_spawn([]), pool=pool)
+        chat.assign_account(pool.get("a"))
+        (chat.config_dir / "last-submit.json").write_text('{"cwd":"/old"}', encoding="utf-8")
+        found = await chat.signal_submit("sid2", wait=0.0)
+        chat._stop_process()
+        return found
+
+    assert asyncio.run(run()) is None
+
+
+def test_signal_submit_gives_up_when_the_hook_never_fires(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    pool = _pool_with_spares(tmp_path)
+
+    async def run():
+        chat = ClaudeChat(spawn=_fake_spawn([]), pool=pool)
+        chat.assign_account(pool.get("a"))
+        found = await chat.signal_submit("sid1", wait=0.05)
+        chat._stop_process()
+        return found
+
+    assert asyncio.run(run()) is None
+
+
+def test_signal_submit_without_an_account_is_a_noop(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    chat = ClaudeChat(spawn=_fake_spawn([]), pool=_pool_with_spares(tmp_path))
+    assert asyncio.run(chat.signal_submit("sid1", wait=0.0)) is None
+
+
+def test_reset_drops_a_stale_submission(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    pool = _pool_with_spares(tmp_path)
+    chat = ClaudeChat(spawn=_fake_spawn([]), pool=pool)
+    chat.assign_account(pool.get("a"))
+    stale = chat.config_dir / "last-submit.json"
+    stale.write_text('{"cwd":"/old"}', encoding="utf-8")
+    chat.reset()
+    assert not stale.is_file()
+
+
+def test_signal_submit_swallows_the_blocked_prompts_result(tmp_path, monkeypatch):
+    """The hook exits 2, but Claude still emits a zero-turn result the phone must not see."""
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    pool = _pool_with_spares(tmp_path)
+
+    async def run():
+        chat = ClaudeChat(spawn=_fake_spawn([], hook_dir=tmp_path / "a"), pool=pool)
+        chat.assign_account(pool.get("a"))
+        await chat.signal_submit("sid1", wait=2.0)
+        chat._stop_process()
+        return chat
+
+    chat = asyncio.run(run())
+    # Shape the live binary returns after a hook-blocked prompt.
+    blocked = {"type": "result", "subtype": "success", "is_error": False,
+               "num_turns": 0, "total_cost_usd": 0, "usage": {}}
+    assert chat._should_swallow(blocked) is True
+    # Only the phantom one; a real turn afterwards still reaches the guest.
+    assert chat._should_swallow(blocked) is False
+
+
+def test_should_swallow_leaves_other_events_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    chat = ClaudeChat(spawn=_fake_spawn([]), pool=_pool_with_spares(tmp_path))
+    chat._swallow_result = True
+    assert chat._should_swallow({"type": "assistant"}) is False
+    assert chat._swallow_result is True  # still armed for the result that follows
+    assert chat._should_swallow({"type": "result"}) is True
+
+
+def test_reset_disarms_the_swallow_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    chat = ClaudeChat(spawn=_fake_spawn([]), pool=_pool_with_spares(tmp_path))
+    chat._swallow_result = True
+    chat.reset()
+    assert chat._swallow_result is False
+    assert chat._should_swallow({"type": "result"}) is False

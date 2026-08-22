@@ -1,9 +1,13 @@
 import json
+import subprocess
 import time
 from pathlib import Path
 
 from apps.seat.accounts import (
+    SUBMIT_MARK,
+    Account,
     AccountPool,
+    clear_submit,
     collect_summary,
     extract_compact_summary,
     history_fallback,
@@ -11,7 +15,9 @@ from apps.seat.accounts import (
     parse_usage_payload,
     preferred_label,
     quota_over_threshold,
+    pool,
     read_handoff,
+    read_submit,
     read_usage_file,
     write_handoff,
 )
@@ -156,3 +162,54 @@ def test_preferred_label(monkeypatch):
     assert preferred_label("claude-seat-2") == "claude-seat-2"
     monkeypatch.setenv("BYOI_CLAUDE_ACCOUNT", "spare")
     assert preferred_label("seat-1") == "spare"
+
+
+def test_ensure_hooks_installs_the_submit_hook(tmp_path: Path):
+    acct = Account(label="claude-seat-1", config_dir=tmp_path)
+    pool.ensure_hooks(acct)
+    script = tmp_path / "byoi-submit.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111
+    hooks = json.loads((tmp_path / "settings.json").read_text())["hooks"]
+    entry = hooks["UserPromptSubmit"][0]["hooks"][0]
+    assert entry["command"] == str(script)
+    # UserPromptSubmit takes no matcher, so the script must filter internally.
+    assert "matcher" not in hooks["UserPromptSubmit"][0]
+
+
+def test_submit_hook_captures_only_the_sentinel(tmp_path: Path):
+    pool.ensure_hooks(Account(label="claude-seat-1", config_dir=tmp_path))
+    script = str(tmp_path / "byoi-submit.sh")
+
+    ordinary = subprocess.run(
+        [script], input='{"prompt":"make the QR darker"}', capture_output=True, text=True
+    )
+    assert ordinary.returncode == 0
+    assert read_submit(tmp_path) is None
+
+    # Field names as the live binary emits them for UserPromptSubmit.
+    payload = (
+        '{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"'
+        + SUBMIT_MARK
+        + ' sid1","cwd":"/srv/proj","transcript_path":"/t.jsonl"}'
+    )
+    fired = subprocess.run([script], input=payload, capture_output=True, text=True)
+    # Exit 2 erases the sentinel so it never costs a model turn.
+    assert fired.returncode == 2
+    captured = read_submit(tmp_path)
+    assert captured["cwd"] == "/srv/proj"
+    assert captured["transcript_path"] == "/t.jsonl"
+
+
+def test_clear_submit_drops_a_previous_guests_file(tmp_path: Path):
+    (tmp_path / "last-submit.json").write_text('{"cwd":"/old"}')
+    assert read_submit(tmp_path) is not None
+    clear_submit(tmp_path)
+    assert read_submit(tmp_path) is None
+    clear_submit(tmp_path)  # idempotent
+    clear_submit(None)
+
+
+def test_read_submit_tolerates_garbage(tmp_path: Path):
+    (tmp_path / "last-submit.json").write_text("not json")
+    assert read_submit(tmp_path) is None

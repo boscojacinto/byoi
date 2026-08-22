@@ -48,6 +48,10 @@ else
   echo "  $0 --account claude-seat-1"
   echo "  $0 --account claude-seat-2"
   echo
+  echo "On the desk PC, the account that writes and grades acceptance suites:"
+  echo
+  echo "  $0 --account claude-host"
+  echo
 fi
 echo "The seat agent talks to Claude Code over stream-json (chat, not a TTY);"
 echo "guests only connect after the host pushes an OTP to this seat."

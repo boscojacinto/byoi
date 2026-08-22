@@ -35,6 +35,12 @@ class AccountIn(BaseModel):
     label: str
 
 
+class SubmitIn(BaseModel):
+    session_id: str
+    cwd: str | None = None
+    push: bool = False
+
+
 app = FastAPI(title="BYOI seat control")
 
 
@@ -151,6 +157,35 @@ async def switch_account(
         raise HTTPException(404, "unknown Claude account")
     await chat_session.switch_account(account, reason="host")
     return {"ok": True, "seat_id": SEAT_ID, **chat_session.snapshot()}
+
+
+@app.post("/local/submit")
+async def submit(
+    request: Request, body: SubmitIn, authorization: str | None = Header(default=None)
+) -> dict:
+    """Fire the seat's UserPromptSubmit hook, then pin the tree to a fetchable ref."""
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+    from .submission import SubmissionError, capture
+
+    hook = await chat_session.signal_submit(body.session_id)
+    cwd = (
+        body.cwd
+        or (hook or {}).get("cwd")
+        or (str(chat_session.workspace_path) if chat_session.workspace_path else None)
+    )
+    if not cwd:
+        raise HTTPException(409, "seat has no workspace for this session")
+    try:
+        captured = capture(cwd=cwd, session_id=body.session_id, push=body.push)
+    except SubmissionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "seat_id": SEAT_ID,
+        "hooked": hook is not None,
+        "transcript_path": (hook or {}).get("transcript_path"),
+        **captured,
+    }
 
 
 @app.post("/local/verify")

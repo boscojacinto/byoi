@@ -74,6 +74,9 @@ markdown. `/export` is still the phone transcript.
 Without two credentialed dirs, a hard usage limit is an error on the phone —
 the visit is not moved to another chair.
 
+The desk needs its own `claude-host` login as well — see *Grading a shipped
+solution* below. It is never used for guest chat.
+
 The seat talks to Claude Code over **stream-json** (the same machine protocol
 the Agent SDK uses). Guests never see a TTY. The working directory is this
 repo (override with `BYOI_WORKSPACE`). Extra trees: `BYOI_ADD_DIR=/path:/other`.
@@ -106,8 +109,62 @@ On the desk (`http://127.0.0.1:8080/`):
 3. Guest claims the brief → seat `cwd` switches to `project.local_path`.
 
 Each brief can include an **acceptance spec**. When the guest marks shipped, the
-seat runs a one-shot Claude Code verifier in that project folder and the phone
-shows passing and failing cases.
+phone shows passing and failing cases — one per requirement in the spec.
+
+## Grading a shipped solution
+
+The spec is graded by the **host** account, not the seat's. The seat only hands
+over the guest's work.
+
+```
+guest taps "I'm done"
+  -> desk POSTs /local/submit to the seat (mTLS)
+       seat injects a sentinel prompt into the live chat
+       -> UserPromptSubmit hook byoi-submit.sh records the submission
+       -> seat pins the tree to refs/byoi/submissions/<session>
+  -> desk generates a suite from the spec, blind
+  -> desk runs it in a container against that ref
+  -> desk grades it and the phone polls the result
+```
+
+Three properties this buys:
+
+* **The author never sees the solution.** Generation runs with `--allowedTools ""`,
+  so the suite is written from the spec alone and cannot be shaped by the code it
+  judges.
+* **Completeness is checked.** Every requirement in the spec must map to a test
+  node. A requirement with no result in the JUnit report is reported as a *failed*
+  `completeness:` case, so a suite that quietly skips one cannot score 100%.
+* **The guest's tree is never touched.** The submission is committed through a
+  scratch index onto a ref under `refs/byoi/`. No branch tracks it; the guest's
+  `HEAD`, index, and working tree are unchanged.
+
+Log the host account in once, alongside the seat accounts:
+
+```bash
+./scripts/seat-claude-login.sh --account claude-host
+CLAUDE_CONFIG_DIR=data/claude-accounts/claude-host claude setup-token
+```
+
+On one PC the desk fetches the ref straight off the project folder. On two
+machines the seat pushes it to the project's `origin` first, so that path needs
+`gh auth login` (or a git credential helper) on the seat.
+
+The suite runs in **Docker** with `--network none`, a pids/memory/CPU cap, and an
+environment scrubbed of every `BYOI_*` value — guest code never sees `host.token`
+or `data/tls/`. Runs land in `data/verify-runs/<session>/`.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `BYOI_HOST_CLAUDE_ACCOUNT` | `claude-host` | Account dir that writes the suite |
+| `BYOI_TESTGEN_RUNTIME` | auto | `docker`, `bwrap`, or `none` |
+| `BYOI_TESTGEN_IMAGE` | from the suite | Override the container image |
+| `BYOI_TESTGEN_TIMEOUT` | `300` | Seconds for generation and for the run |
+| `BYOI_VERIFY_RUNS_DIR` | `data/verify-runs` | Where checkouts and reports land |
+
+If the host account is not logged in, the project is not a git repo, or no
+container runtime is available, the desk falls back to the old seat-side verifier
+(`apps/seat/verify.py`) and says so in the report summary.
 
 New GitHub repos clone into `data/projects/` (override with `BYOI_PROJECTS_DIR`).
 `gh auth login` once on the seat/desk PC.
