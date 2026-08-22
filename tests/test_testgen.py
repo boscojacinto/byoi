@@ -347,3 +347,56 @@ def test_a_total_failure_still_produces_a_report(tmp_path: Path, monkeypatch):
     tests = desk.get(f"/api/sessions/{sid}/tests").json()
     assert tests["test_status"] == "failed"
     assert "everything is down" in tests["test_report"]["summary"]
+
+
+# ------------------------------------------------------------------ smoke mode
+
+
+def test_smoke_prompt_targets_the_env_var_not_a_hardcoded_host():
+    text = testgen.smoke_prompt(title="Notes", spec="- health is 200", url="https://x.vercel.app")
+    assert "BYOI_TARGET_URL" in text
+    assert "never hard-code the host" in text
+    assert "have NOT seen the code" in text
+
+
+def test_smoke_run_opens_the_network_and_passes_the_url(tmp_path):
+    plan = {**PLAN, "command": "true"}
+    argv = testgen.run_argv(
+        tmp_path, plan, "docker", network=True, env_extra={"BYOI_TARGET_URL": "https://x"}
+    )
+    assert argv[argv.index("--network") + 1] == "bridge"
+    assert "BYOI_TARGET_URL=https://x" in argv
+
+
+def test_the_sandboxed_suite_still_has_no_network(tmp_path):
+    argv = testgen.run_argv(tmp_path, PLAN, "docker")
+    assert argv[argv.index("--network") + 1] == "none"
+
+
+def test_smoke_without_a_url_is_refused():
+    with pytest.raises(TestgenError, match="no deployment URL"):
+        testgen.run_smoke(spec="- x", title="t", url="", session_id="s")
+
+
+def test_smoke_runs_only_generated_code_never_the_guest_tree(tmp_path, monkeypatch):
+    """Network is open for this run, so the guest's code must not be in the directory."""
+    plan = {
+        **PLAN,
+        "command": (
+            "mkdir -p .byoi && printf '%s' "
+            "'<testsuite><testcase classname=\"t\" name=\"test_quiet_zone\"/>"
+            "<testcase classname=\"t\" name=\"test_contrast\"/></testsuite>' > .byoi/junit.xml"
+        ),
+    }
+    monkeypatch.setattr(testgen, "generate_suite", lambda **k: plan)
+    monkeypatch.setenv("BYOI_TESTGEN_RUNTIME", "none")
+    monkeypatch.setenv("BYOI_VERIFY_RUNS_DIR", str(tmp_path / "runs"))
+
+    report = testgen.run_smoke(
+        spec="- quiet zone\n- contrast", title="t", url="https://x.vercel.app", session_id="sid"
+    )
+    assert report["passed"] == 2
+    assert report["summary"].startswith("Against https://x.vercel.app")
+    dest = tmp_path / "runs" / "sid-smoke"
+    # Only what we generated: the tests and our bookkeeping, no project files.
+    assert sorted(p.name for p in dest.iterdir()) == [".byoi"]

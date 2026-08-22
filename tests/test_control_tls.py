@@ -171,3 +171,93 @@ def test_submit_without_a_workspace_is_a_conflict(monkeypatch):
     )
     assert res.status_code == 409
     assert "no workspace" in res.json()["detail"]
+
+
+def test_infra_endpoints_require_the_host_token():
+    client = TestClient(control_app)
+    assert client.post("/local/infra/up", json={"session_id": "s"}).status_code == 401
+    assert client.post("/local/infra/down", json={"session_id": "s"}).status_code == 401
+    assert client.get("/local/infra", params={"session_id": "s"}).status_code == 401
+
+
+def test_infra_status_is_quiet_when_nothing_is_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_INFRA_DIR", str(tmp_path))
+    client = TestClient(control_app)
+    res = client.get(
+        "/local/infra",
+        params={"session_id": "sid-none"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.status_code == 200
+    assert res.json()["up"] is False
+
+
+def test_infra_up_without_a_workspace_is_a_conflict():
+    client = TestClient(control_app)
+    res = client.post(
+        "/local/infra/up",
+        json={"session_id": "sid"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.status_code == 409
+    assert "no workspace" in res.json()["detail"]
+
+
+def test_revoke_brings_the_local_stack_down(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_INFRA_DIR", str(tmp_path))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "apps.seat.infra.down", lambda sid, **k: calls.append(sid) or {"ok": True, "removed": True}
+    )
+    client = TestClient(control_app)
+    client.post(
+        "/local/admit",
+        json={"otp": "abc-123", "session_id": "sid-live", "seat_id": "seat-1"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    res = client.post("/local/revoke", headers={"Authorization": "Bearer byoi-host"})
+    assert res.status_code == 200
+    assert calls == ["sid-live"]
+    assert res.json()["infra"]["removed"] is True
+
+
+def test_revoke_survives_a_broken_docker(monkeypatch):
+    def boom(sid, **k):
+        raise RuntimeError("docker daemon is gone")
+
+    monkeypatch.setattr("apps.seat.infra.down", boom)
+    client = TestClient(control_app)
+    client.post(
+        "/local/admit",
+        json={"otp": "abc-123", "session_id": "sid-live", "seat_id": "seat-1"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    res = client.post("/local/revoke", headers={"Authorization": "Bearer byoi-host"})
+    # Freeing the seat must never depend on Docker being healthy.
+    assert res.status_code == 200
+    assert res.json()["admitted"] is False
+    assert "docker daemon is gone" in res.json()["infra"]["detail"]
+
+
+def test_submit_kind_selects_the_deploy_ref(tmp_path, monkeypatch):
+    import subprocess
+
+    from apps.seat.claude_chat import session as chat_session
+
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    for args in (("init", "-q", "."), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
+        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
+    (repo / "app.py").write_text("x\n")
+
+    async def fake_signal(session_id, **kwargs):
+        return {"cwd": str(repo)}
+
+    monkeypatch.setattr(chat_session, "signal_submit", fake_signal)
+    client = TestClient(control_app)
+    res = client.post(
+        "/local/submit",
+        json={"session_id": "sid1", "kind": "deploy"},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.json()["ref"] == "refs/byoi/deploys/sid1"

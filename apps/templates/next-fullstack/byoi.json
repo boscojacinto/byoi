@@ -1,0 +1,9 @@
+{
+  "framework": "nextjs",
+  "needs": ["postgres", "redis", "auth"],
+  "install": "npm install",
+  "build": "npm run build",
+  "dev": "npm run dev",
+  "migrate": "npm run db:init",
+  "health": "/api/health"
+}

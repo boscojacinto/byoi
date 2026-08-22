@@ -22,6 +22,16 @@ function escapeHtml(text) {
     .replace(/"/g, "&quot;");
 }
 
+function fillTemplateSelect(templates) {
+  const sel = document.querySelector("#templateSelect");
+  if (!sel) return;
+  const chosen = sel.value;
+  sel.innerHTML = templates
+    .map((t) => `<option value="${t.name}">${t.name} — ${(t.needs || []).join(", ") || "no infra"}</option>`)
+    .join("");
+  if (chosen) sel.value = chosen;
+}
+
 function fillProjectSelect(selected) {
   const sel = $("projectSel");
   if (!sel) return;
@@ -169,16 +179,18 @@ function quotaLabel(quota) {
 }
 
 async function refresh() {
-  const [{ seats }, { items }, proj, health, accounts, live] = await Promise.all([
+  const [{ seats }, { items }, proj, tpl, health, accounts, live] = await Promise.all([
     api("/api/seats"),
     api("/api/board"),
     api("/api/projects").catch(() => ({ projects: [] })),
+    api("/api/templates").catch(() => ({ templates: [] })),
     api("/api/health").catch(() => ({ ok: false })),
     api("/api/claude-accounts").catch(() => ({ accounts: [] })),
     api("/api/live").catch(() => ({ sessions: [] })),
   ]);
   projects = proj.projects || [];
   fillProjectSelect();
+  fillTemplateSelect(tpl.templates || []);
 
   const occ = seats.filter((s) => s.session);
   const open = seats.filter((s) => !s.session);
@@ -355,6 +367,7 @@ $("newProject").addEventListener("submit", async (ev) => {
         name: fd.get("name"),
         url: fd.get("url"),
         path: fd.get("path"),
+        template: fd.get("template"),
         description: fd.get("description"),
         private: fd.get("private") === "on",
       }),

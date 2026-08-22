@@ -1,0 +1,180 @@
+"""Host-brokered Vercel deploys of a guest's work.
+
+The guest never holds a credential. The seat pins the tree to a git ref, the
+desk fetches that ref, provisions managed infrastructure, and only then runs
+`vercel` with its own token — at which point no guest code is executing.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from . import projects as project_ops
+from . import provision as provisioning
+
+ROOT = Path(__file__).resolve().parents[2]
+URL_RE = re.compile(r"https://[^\s]+\.vercel\.app")
+
+
+class DeployError(RuntimeError):
+    """Precondition or tool failure. Recorded on the deployment, not raised as a 500."""
+
+
+def vercel_bin() -> str:
+    return os.environ.get("BYOI_VERCEL", "vercel")
+
+
+def deploy_timeout() -> int:
+    try:
+        return int(os.environ.get("BYOI_DEPLOY_TIMEOUT", "600"))
+    except ValueError:
+        return 600
+
+
+def runs_dir() -> Path:
+    raw = os.environ.get("BYOI_DEPLOY_RUNS_DIR", "").strip()
+    path = Path(raw).expanduser() if raw else ROOT / "data" / "deploy-runs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def _token() -> str:
+    token = os.environ.get("BYOI_VERCEL_TOKEN", "").strip()
+    if not token:
+        raise DeployError(
+            "no Vercel token on the desk — set BYOI_VERCEL_TOKEN (never on the seat)"
+        )
+    return token
+
+
+def _clean_env() -> dict[str, str]:
+    """Vercel gets its token and nothing else of ours."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "VERCEL_TELEMETRY_DISABLED": "1",
+    }
+
+
+def deploy_argv(dest: Path, env: dict[str, str], *, token: str, production: bool = False) -> list[str]:
+    argv = [vercel_bin(), "deploy", "--yes", "--token", token, "--cwd", str(dest)]
+    scope = os.environ.get("BYOI_VERCEL_SCOPE", "").strip()
+    if scope:
+        argv += ["--scope", scope]
+    argv.append("--prod" if production else "--target=preview")
+    for key, value in sorted(env.items()):
+        # Present at build time (migrations) and at runtime (the app itself).
+        argv += ["--build-env", f"{key}={value}", "--env", f"{key}={value}"]
+    return argv
+
+
+def _run(argv: list[str], *, timeout: int, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            argv,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_clean_env(),
+        )
+    except FileNotFoundError as exc:
+        raise DeployError(f"{argv[0]} is not on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DeployError("the deploy timed out") from exc
+
+
+def _redact(text: str, token: str) -> str:
+    return (text or "").replace(token, "***") if token else (text or "")
+
+
+def fetch(*, source: str, ref: str, dest: Path) -> None:
+    """Same checkout mechanism the acceptance suite uses."""
+    from .testgen import TestgenError, fetch_submission
+
+    try:
+        fetch_submission(source=source, ref=ref, dest=dest)
+    except TestgenError as exc:
+        raise DeployError(str(exc)) from exc
+
+
+def run(
+    *,
+    session_id: str,
+    source: str,
+    ref: str,
+    production: bool = False,
+) -> dict[str, Any]:
+    """Fetch the pinned ref, provision, deploy. Returns url/resources/notes."""
+    if not shutil.which(vercel_bin()):
+        raise DeployError(f"{vercel_bin()} is not on PATH on the desk")
+    token = _token()
+
+    dest = runs_dir() / (session_id or "session")
+    fetch(source=source, ref=ref, dest=dest)
+
+    detected = project_ops.detect(dest)
+    if not detected.get("deployable", True):
+        raise DeployError(
+            f"this project does not look deployable to Vercel (framework: {detected.get('framework')})"
+        )
+
+    resources, notes = provisioning.provision(
+        session_id=session_id, needs=list(detected.get("needs") or [])
+    )
+    env = provisioning.env_from(resources)
+
+    proc = _run(
+        deploy_argv(dest, env, token=token, production=production),
+        timeout=deploy_timeout(),
+        cwd=dest,
+    )
+    stdout = _redact(proc.stdout or "", token)
+    stderr = _redact(proc.stderr or "", token)
+    if proc.returncode != 0:
+        # Don't strand what we just created if the deploy itself failed.
+        problems = provisioning.destroy(resources)
+        detail = (stderr or stdout or f"vercel exited {proc.returncode}").strip()[-800:]
+        if problems:
+            detail += " | cleanup: " + "; ".join(problems)
+        raise DeployError(detail)
+
+    match = URL_RE.search(stdout) or URL_RE.search(stderr)
+    if not match:
+        provisioning.destroy(resources)
+        raise DeployError("vercel did not print a deployment URL")
+
+    return {
+        "url": match.group(0),
+        "resources": resources,
+        "notes": notes,
+        "framework": detected.get("framework"),
+        "detail": "; ".join(notes) if notes else None,
+    }
+
+
+def teardown(deployment: dict[str, Any]) -> dict[str, Any]:
+    """Remove the deployment and destroy its managed infrastructure. Best effort."""
+    problems: list[str] = []
+    url = deployment.get("url")
+    if url:
+        try:
+            token = _token()
+            proc = _run(
+                [vercel_bin(), "remove", url, "--yes", "--token", token],
+                timeout=min(deploy_timeout(), 180),
+            )
+            if proc.returncode != 0:
+                problems.append(
+                    _redact((proc.stderr or proc.stdout or "vercel remove failed"), token).strip()[-300:]
+                )
+        except DeployError as exc:
+            problems.append(str(exc))
+    problems.extend(provisioning.destroy(deployment.get("resources") or []))
+    return {"ok": not problems, "problems": problems}

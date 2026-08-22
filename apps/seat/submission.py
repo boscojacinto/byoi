@@ -13,17 +13,22 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-REF_PREFIX = "refs/byoi/submissions"
+REF_PREFIXES = {
+    "submission": "refs/byoi/submissions",
+    "deploy": "refs/byoi/deploys",
+}
+REF_PREFIX = REF_PREFIXES["submission"]
 
 
 class SubmissionError(RuntimeError):
     """Precondition the desk should report and fall back on, not a 500."""
 
 
-def ref_for(session_id: str) -> str:
+def ref_for(session_id: str, kind: str = "submission") -> str:
     sid = (session_id or "").strip() or "seat"
     safe = "".join(c if (c.isalnum() or c in "-._") else "-" for c in sid)
-    return f"{REF_PREFIX}/{safe}"
+    prefix = REF_PREFIXES.get(kind or "submission", REF_PREFIX)
+    return f"{prefix}/{safe}"
 
 
 def _git(*args: str, cwd: Path, env: dict[str, str] | None = None, check: bool = True) -> str:
@@ -57,7 +62,9 @@ def origin_url(cwd: Path) -> str | None:
     return url or None
 
 
-def capture(*, cwd: str | Path, session_id: str, push: bool = False) -> dict[str, Any]:
+def capture(
+    *, cwd: str | Path, session_id: str, push: bool = False, kind: str = "submission"
+) -> dict[str, Any]:
     """Commit the working tree to refs/byoi/submissions/<session_id>.
 
     Returns the ref, its commit sha, the repo toplevel, and the origin URL when
@@ -67,7 +74,7 @@ def capture(*, cwd: str | Path, session_id: str, push: bool = False) -> dict[str
     if not work.is_dir():
         raise SubmissionError(f"not a directory: {work}")
     top = _toplevel(work)
-    ref = ref_for(session_id)
+    ref = ref_for(session_id, kind)
 
     with tempfile.TemporaryDirectory() as tmp:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
@@ -79,7 +86,7 @@ def capture(*, cwd: str | Path, session_id: str, push: bool = False) -> dict[str
     args = ["commit-tree", tree]
     if parent:
         args += ["-p", parent]
-    args += ["-m", f"byoi submission {session_id}"]
+    args += ["-m", f"byoi {kind} {session_id}"]
     commit = _git(*args, cwd=top)
     _git("update-ref", ref, commit, cwd=top)
 

@@ -98,11 +98,13 @@
         <summary>New project</summary>
         <form id="newProject">
           <p class="row">
-            <label><input type="radio" name="kind" value="github" checked /> GitHub</label>
+            <label><input type="radio" name="kind" value="template" checked /> Template</label>
+            <label><input type="radio" name="kind" value="github" /> GitHub</label>
             <label><input type="radio" name="kind" value="clone" /> Clone</label>
             <label><input type="radio" name="kind" value="local" /> Folder</label>
           </p>
           <input name="name" placeholder="Name" />
+          <select name="template" id="templateSelect"></select>
           <input name="url" placeholder="GitHub link" />
           <input name="path" placeholder="Folder on this computer" />
           <label class="row"><input type="checkbox" name="private" checked /> Private</label>

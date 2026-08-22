@@ -169,6 +169,76 @@ container runtime is available, the desk falls back to the old seat-side verifie
 New GitHub repos clone into `data/projects/` (override with `BYOI_PROJECTS_DIR`).
 `gh auth login` once on the seat/desk PC.
 
+## Deployable projects
+
+A brief can point at a project that has a real data layer. **New project →
+Template** copies `apps/templates/next-fullstack` — Next.js with Postgres, a
+session cookie, and Redis already wired — and commits it. Existing repos are
+sniffed instead (`byoi.json` if present, otherwise `package.json`, lockfiles,
+and `.env.example`), so any Next/Nuxt/Astro/SvelteKit tree works.
+
+### The URL contract
+
+The app only ever reads `DATABASE_URL`, `REDIS_URL`, and `AUTH_SECRET`:
+
+| Where | What backs them |
+|---|---|
+| Seat, during the session | Docker Compose stack, written into `.env.local` |
+| Vercel preview, on deploy | Managed Postgres/Redis, injected by the desk |
+
+Nothing in the app branches on environment. The same code is developed, graded,
+and deployed.
+
+### On the seat
+
+Claiming a brief whose project needs infrastructure starts a per-session stack
+(`docker compose -p byoi-<session>`) with **ephemeral host ports**, so several
+seats on one PC never collide. Only the salon's own block of `.env.local` is
+rewritten — a guest's own variables survive. `docker compose down -v` runs when
+the host frees the seat.
+
+### Deploying
+
+The guest taps **Deploy preview**. The seat pins the tree to
+`refs/byoi/deploys/<session>` — the same non-destructive capture used for
+grading — and the desk fetches it, provisions managed infrastructure, and runs
+`vercel` with its own token.
+
+**The token never goes near the seat.** The guest's Claude has Bash and inherits
+the seat's environment, so a Vercel token there would be readable, and usable,
+by guest code. The desk deploys from a checkout instead, at a moment when no
+guest code is running, and passes `vercel` a scrubbed environment. Tokens are
+redacted out of any error before it is stored or shown.
+
+If the preview comes up and the brief has a spec, a **smoke suite** is generated
+from that spec and run against the live URL. That run gets network access, so it
+gets *only* the generated tests — the guest's tree is never in the directory.
+
+### Teardown
+
+Ephemeral by policy: freeing the seat removes the deployment, destroys the
+provisioned database and cache, and brings the seat's local stack down. A
+failure at any step is recorded but never blocks freeing the seat.
+
+### Credentials (desk only)
+
+| Env | Effect if unset |
+|---|---|
+| `BYOI_VERCEL_TOKEN` | Deploy is refused with a clear message |
+| `BYOI_VERCEL_SCOPE` | Personal account is used |
+| `BYOI_NEON_API_KEY` | Deploy ships without a managed Postgres, and says so |
+| `BYOI_UPSTASH_EMAIL` / `BYOI_UPSTASH_API_KEY` | Ships without a managed Redis, and says so |
+
+Auth needs no vendor: a fresh `AUTH_SECRET` is minted per deploy. Missing
+credentials degrade the deploy, they never fail it — which is the right
+behaviour for a brief that has no data layer.
+
+One known limitation: `vercel` takes environment values as command-line
+arguments, so during the seconds a deploy is running they are visible in `ps`
+to other local users **on the desk PC**. The desk is the operator's own machine
+and the guest has no account on it, so this is not a guest-facing hole — but do
+not run the desk on a shared login.
+
 ## Floor
 
 1. Host checks the coder in. Desk **POSTs the OTP to the seat over mTLS**,

@@ -96,3 +96,65 @@ def test_claude_chat_switches_cwd(tmp_path: Path):
     other.mkdir()
     assert chat.set_workspace(other) == other.resolve()
     assert chat.workspace_path == other.resolve()
+
+
+def test_detect_reads_a_byoi_manifest(tmp_path):
+    from apps.api.projects import detect
+
+    (tmp_path / "byoi.json").write_text('{"framework":"remix","needs":["postgres"],"build":"x"}')
+    out = detect(tmp_path)
+    assert out["source"] == "manifest"
+    assert out["framework"] == "remix"
+    assert out["needs"] == ["postgres"]
+    assert out["deployable"] is True
+
+
+def test_detect_falls_back_to_heuristics(tmp_path):
+    from apps.api.projects import detect
+
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{"next":"15","ioredis":"5","@auth/core":"0.3"},'
+        '"scripts":{"build":"next build","db:init":"node x"}}'
+    )
+    (tmp_path / ".env.example").write_text("DATABASE_URL=postgres://x\n")
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    out = detect(tmp_path)
+    assert out["source"] == "detected"
+    assert out["framework"] == "nextjs"
+    assert sorted(out["needs"]) == ["auth", "postgres", "redis"]
+    assert out["install"] == "pnpm install"
+    assert out["migrate"] == "pnpm run db:init"
+
+
+def test_detect_marks_a_python_repo_undeployable(tmp_path):
+    from apps.api.projects import detect
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    out = detect(tmp_path)
+    assert out["framework"] == "python"
+    assert out["deployable"] is False
+
+
+def test_detect_survives_broken_json(tmp_path):
+    from apps.api.projects import detect
+
+    (tmp_path / "package.json").write_text("{not json")
+    assert detect(tmp_path)["framework"] is None
+
+
+def test_templates_carry_their_spec():
+    from apps.api.projects import templates
+
+    starter = next(t for t in templates() if t["name"] == "next-fullstack")
+    assert "GET /api/health" in starter["spec"]
+    assert sorted(starter["needs"]) == ["auth", "postgres", "redis"]
+
+
+def test_from_template_rejects_an_unknown_name(tmp_path, monkeypatch):
+    import pytest
+
+    from apps.api.projects import from_template
+
+    monkeypatch.setenv("BYOI_PROJECTS_DIR", str(tmp_path))
+    with pytest.raises(ValueError, match="unknown template"):
+        from_template(template="nope")

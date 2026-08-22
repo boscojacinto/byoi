@@ -53,6 +53,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     test_report TEXT,
     FOREIGN KEY (seat_id) REFERENCES seats(id)
 );
+CREATE TABLE IF NOT EXISTS deployments (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    project_id TEXT,
+    provider TEXT NOT NULL DEFAULT 'vercel',
+    state TEXT NOT NULL DEFAULT 'pending',
+    url TEXT,
+    ref TEXT,
+    detail TEXT,
+    resources TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL,
+    torn_down_at REAL,
+    FOREIGN KEY (session_id) REFERENCES sessions (id)
+);
 CREATE TABLE IF NOT EXISTS print_jobs (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -110,6 +124,11 @@ class Store:
             self.conn.execute("ALTER TABLE board ADD COLUMN project_id TEXT")
         if "spec" not in self._columns("board"):
             self.conn.execute("ALTER TABLE board ADD COLUMN spec TEXT NOT NULL DEFAULT ''")
+        proj_cols = self._columns("projects")
+        if "framework" not in proj_cols:
+            self.conn.execute("ALTER TABLE projects ADD COLUMN framework TEXT")
+        if "template" not in proj_cols:
+            self.conn.execute("ALTER TABLE projects ADD COLUMN template TEXT")
         sess_cols = self._columns("sessions")
         if "test_status" not in sess_cols:
             self.conn.execute("ALTER TABLE sessions ADD COLUMN test_status TEXT")
@@ -217,21 +236,37 @@ class Store:
         row = self.conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         return dict(row) if row else None
 
-    def add_project(self, *, name: str, local_path: str, github: str | None = None) -> dict[str, Any]:
+    def add_project(
+        self,
+        *,
+        name: str,
+        local_path: str,
+        github: str | None = None,
+        framework: str | None = None,
+        template: str | None = None,
+    ) -> dict[str, Any]:
         item = {
             "id": str(uuid.uuid4())[:8],
             "name": name.strip() or Path(local_path).name,
             "github": (github or "").strip() or None,
             "local_path": str(Path(local_path).expanduser()),
+            "framework": (framework or "").strip() or None,
+            "template": (template or "").strip() or None,
             "created_at": time.time(),
         }
         self.conn.execute(
-            "INSERT INTO projects (id, name, github, local_path, created_at) "
-            "VALUES (:id,:name,:github,:local_path,:created_at)",
+            "INSERT INTO projects (id, name, github, local_path, framework, template, created_at) "
+            "VALUES (:id,:name,:github,:local_path,:framework,:template,:created_at)",
             item,
         )
         self.conn.commit()
         return item
+
+    def set_project_framework(self, project_id: str, framework: str | None) -> None:
+        self.conn.execute(
+            "UPDATE projects SET framework=? WHERE id=?", ((framework or "") or None, project_id)
+        )
+        self.conn.commit()
 
     def board(self, published_only: bool = True) -> list[dict[str, Any]]:
         sql = "SELECT * FROM board"
@@ -382,6 +417,100 @@ class Store:
         )
         self.conn.commit()
         return self.session(session_id)
+
+    # ------------------------------------------------------------- deployments
+
+    def _deployment_dict(self, row: Any) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        raw = item.get("resources")
+        try:
+            item["resources"] = json.loads(raw) if raw else []
+        except (TypeError, json.JSONDecodeError):
+            item["resources"] = []
+        return item
+
+    def deployment(self, deployment_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone()
+        return self._deployment_dict(row)
+
+    def deployment_for_session(self, session_id: str) -> dict[str, Any] | None:
+        """The newest deployment for a session, torn down or not."""
+        row = self.conn.execute(
+            "SELECT * FROM deployments WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return self._deployment_dict(row)
+
+    def live_deployments(self) -> list[dict[str, Any]]:
+        """Everything still costing money — what teardown has to reach."""
+        rows = self.conn.execute(
+            "SELECT * FROM deployments WHERE torn_down_at IS NULL AND state != 'torn_down' "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+        return [d for d in (self._deployment_dict(r) for r in rows) if d]
+
+    def start_deployment(
+        self, *, session_id: str, project_id: str | None = None, provider: str = "vercel"
+    ) -> dict[str, Any]:
+        item = {
+            "id": str(uuid.uuid4())[:8],
+            "session_id": session_id,
+            "project_id": project_id,
+            "provider": provider,
+            "state": "running",
+            "url": None,
+            "ref": None,
+            "detail": None,
+            "resources": "[]",
+            "created_at": time.time(),
+            "torn_down_at": None,
+        }
+        self.conn.execute(
+            "INSERT INTO deployments (id, session_id, project_id, provider, state, url, ref, "
+            "detail, resources, created_at, torn_down_at) "
+            "VALUES (:id,:session_id,:project_id,:provider,:state,:url,:ref,:detail,:resources,"
+            ":created_at,:torn_down_at)",
+            item,
+        )
+        self.conn.commit()
+        return self.deployment(item["id"]) or {}
+
+    def update_deployment(
+        self,
+        deployment_id: str,
+        *,
+        state: str | None = None,
+        url: str | None = None,
+        ref: str | None = None,
+        detail: str | None = None,
+        resources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        sets: list[str] = []
+        args: list[Any] = []
+        for field, value in (("state", state), ("url", url), ("ref", ref), ("detail", detail)):
+            if value is not None:
+                sets.append(f"{field}=?")
+                args.append(value)
+        if resources is not None:
+            sets.append("resources=?")
+            args.append(json.dumps(resources))
+        if not sets:
+            return self.deployment(deployment_id)
+        args.append(deployment_id)
+        self.conn.execute(f"UPDATE deployments SET {', '.join(sets)} WHERE id=?", args)
+        self.conn.commit()
+        return self.deployment(deployment_id)
+
+    def mark_torn_down(self, deployment_id: str, detail: str | None = None) -> dict[str, Any] | None:
+        self.conn.execute(
+            "UPDATE deployments SET state='torn_down', torn_down_at=?, detail=COALESCE(?, detail) "
+            "WHERE id=?",
+            (time.time(), detail, deployment_id),
+        )
+        self.conn.commit()
+        return self.deployment(deployment_id)
 
     def session_by_otp(self, otp: str) -> dict[str, Any] | None:
         needle = (otp or "").strip().casefold()

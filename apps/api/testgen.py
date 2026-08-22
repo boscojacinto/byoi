@@ -129,7 +129,33 @@ def generate_prompt(*, title: str, spec: str) -> str:
     )
 
 
-def generate_suite(*, spec: str, title: str = "") -> dict[str, Any]:
+def smoke_prompt(*, title: str, spec: str, url: str) -> str:
+    return (
+        "You are the BYOI salon smoke-test author. A guest's project has just been\n"
+        "deployed and you are checking the running service, not the source.\n"
+        "You have NOT seen the code and must not ask for it.\n\n"
+        f"Brief title: {title or '(untitled)'}\n"
+        f"The deployment is reachable at the environment variable BYOI_TARGET_URL\n"
+        f"(currently {url}). Always read the variable; never hard-code the host.\n\n"
+        "SPEC (written by the host):\n"
+        f"{spec.strip()}\n\n"
+        "Rules:\n"
+        "- Only requirements observable over HTTP belong here. Skip anything that\n"
+        "  can only be checked by reading source, and say so in the summary.\n"
+        "- Each such requirement gets an entry in `cases` mapped to a test node.\n"
+        "- Put tests under `.byoi/tests/`, paths relative to the working directory.\n"
+        f"- `command` must write JUnit XML to `{JUNIT_REL}`.\n"
+        "- Only the standard library plus what `image` already ships; `setup` runs\n"
+        "  with network access but keep installs minimal.\n"
+        "- Follow redirects, allow a few seconds of cold start, and assert on status\n"
+        "  codes and response bodies rather than on exact HTML.\n"
+        "Return structured output only."
+    )
+
+
+def generate_suite(
+    *, spec: str, title: str = "", mode: str = "code", target_url: str = ""
+) -> dict[str, Any]:
     """Stage A. Runs on the host account with no tools at all — spec in, plan out."""
     config_dir = host_config_dir()
     if not (config_dir / ".credentials.json").is_file():
@@ -138,10 +164,15 @@ def generate_suite(*, spec: str, title: str = "") -> dict[str, Any]:
             f"(scripts/seat-claude-login.sh --account {host_account_label()})"
         )
     binary = shutil.which(CLAUDE_BIN) or CLAUDE_BIN
+    prompt = (
+        smoke_prompt(title=title, spec=spec, url=target_url)
+        if mode == "smoke"
+        else generate_prompt(title=title, spec=spec)
+    )
     argv = [
         binary,
         "-p",
-        generate_prompt(title=title, spec=spec),
+        prompt,
         "--output-format",
         "json",
         "--json-schema",
@@ -259,21 +290,32 @@ def _clean_env(dest: Path) -> dict[str, str]:
     }
 
 
-def run_argv(dest: Path, plan: dict[str, Any], mode: str) -> list[str]:
+def run_argv(
+    dest: Path,
+    plan: dict[str, Any],
+    mode: str,
+    *,
+    network: bool = False,
+    env_extra: dict[str, str] | None = None,
+) -> list[str]:
     script = plan["command"]
     if plan.get("setup"):
         script = f"{plan['setup']}\n{script}"
     if mode == "docker":
         image = os.environ.get("BYOI_TESTGEN_IMAGE", "").strip() or plan["image"]
+        passthrough: list[str] = []
+        for key, value in sorted((env_extra or {}).items()):
+            passthrough += ["-e", f"{key}={value}"]
         return [
             "docker", "run", "--rm",
-            "--network", "none",
+            *(["--network", "bridge"] if network else ["--network", "none"]),
             "--pids-limit", "256",
             "--memory", "2g",
             "--cpus", "2",
             "-u", f"{os.getuid()}:{os.getgid()}",
             "--tmpfs", "/tmp",
             "-e", "HOME=/tmp",
+            *passthrough,
             "-v", f"{dest}:/work",
             "-w", "/work",
             image,
@@ -282,7 +324,7 @@ def run_argv(dest: Path, plan: dict[str, Any], mode: str) -> list[str]:
     if mode == "bwrap":
         return [
             "bwrap",
-            "--unshare-all",
+            *(["--unshare-user", "--unshare-pid", "--unshare-ipc"] if network else ["--unshare-all"]),
             "--die-with-parent",
             "--ro-bind", "/usr", "/usr",
             "--ro-bind", "/etc", "/etc",
@@ -299,9 +341,17 @@ def run_argv(dest: Path, plan: dict[str, Any], mode: str) -> list[str]:
     return ["sh", "-lc", script]
 
 
-def run_suite(dest: Path, plan: dict[str, Any]) -> dict[str, Any]:
+def run_suite(
+    dest: Path,
+    plan: dict[str, Any],
+    *,
+    network: bool = False,
+    env_extra: dict[str, str] | None = None,
+) -> dict[str, Any]:
     mode = runtime()
-    argv = run_argv(dest, plan, mode)
+    argv = run_argv(dest, plan, mode, network=network, env_extra=env_extra)
+    env = _clean_env(dest)
+    env.update(env_extra or {})
     try:
         proc = subprocess.run(
             argv,
@@ -309,7 +359,7 @@ def run_suite(dest: Path, plan: dict[str, Any]) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=timeout_s(),
-            env=_clean_env(dest),
+            env=env,
         )
     except FileNotFoundError as exc:
         raise TestgenError(f"{mode} is not on PATH") from exc
@@ -437,6 +487,31 @@ def grade(plan: dict[str, Any], dest: Path, run: dict[str, Any]) -> dict[str, An
 
 
 # ------------------------------------------------------------------------ pipeline
+
+
+def run_smoke(*, spec: str, title: str, url: str, session_id: str) -> dict[str, Any]:
+    """Check the running deployment over HTTP.
+
+    The container gets network here, so it must never get the guest's tree with
+    it: the run directory holds only the tests we just generated. Guest code is
+    not present, and so cannot use the network we opened.
+    """
+    if not (url or "").strip():
+        raise TestgenError("no deployment URL to smoke test")
+    if not (spec or "").strip():
+        return {"summary": "No spec on this brief.", "passed": 0, "failed": 0, "cases": []}
+    plan = generate_suite(spec=spec, title=title, mode="smoke", target_url=url)
+    dest = runs_dir() / f"{session_id or 'session'}-smoke"
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    write_suite(dest, plan)
+    (dest / ".byoi" / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    result = run_suite(dest, plan, network=True, env_extra={"BYOI_TARGET_URL": url})
+    report = grade(plan, dest, result)
+    report["summary"] = f"Against {url} — {report['summary']}"
+    (dest / ".byoi" / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
 
 
 def run(*, spec: str, title: str, source: str, ref: str, session_id: str) -> dict[str, Any]:

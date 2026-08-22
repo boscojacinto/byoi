@@ -14,10 +14,12 @@ from pydantic import BaseModel, Field
 
 from apps.host_token import token_is_weak, token_matches
 
+from . import deploy as deploy_ops
 from . import projects as project_ops
 from . import seat_sync
 from . import testgen
 from .printing import print_slip
+from .deploy import DeployError
 from .seat_sync import SeatSyncError
 from .testgen import TestgenError
 from .slips import WIFI_SSID, compose_checkin_slip, public_base, public_host, save_join_qr, seat_join_url
@@ -40,12 +42,18 @@ class BoardIn(BaseModel):
 
 
 class ProjectIn(BaseModel):
-    kind: str = Field("local", pattern="^(local|clone|github)$")
+    kind: str = Field("local", pattern="^(local|clone|github|template)$")
     name: str | None = None
     path: str | None = None
     url: str | None = None
+    template: str | None = None
     description: str = ""
     private: bool = True
+    push: bool = False
+
+
+class DeployIn(BaseModel):
+    production: bool = False
 
 
 class BoardProjectIn(BaseModel):
@@ -114,7 +122,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def post_project(request: Request, body: ProjectIn, authorization: str | None = Header(default=None)) -> dict:
         require_host(request, authorization)
         try:
-            if body.kind == "github":
+            if body.kind == "template":
+                made = project_ops.from_template(
+                    template=body.template or "",
+                    name=body.name,
+                    private=body.private,
+                    github=body.push,
+                )
+            elif body.kind == "github":
                 made = project_ops.create_github(
                     name=body.name or "",
                     description=body.description,
@@ -130,7 +145,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(502, str(exc)) from exc
-        return store.add_project(name=made["name"] or "project", local_path=made["local_path"] or "", github=made.get("github"))
+        local_path = made["local_path"] or ""
+        framework = made.get("framework") or (project_ops.detect(local_path).get("framework") if local_path else None)
+        return store.add_project(
+            name=made["name"] or "project",
+            local_path=local_path,
+            github=made.get("github"),
+            framework=framework,
+            template=made.get("template"),
+        )
+
+    @app.get("/api/templates")
+    def get_templates() -> dict:
+        return {"templates": project_ops.templates()}
 
     @app.post("/api/board/{board_id}/project")
     def assign_project(
@@ -234,8 +261,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             sessions.append({"seat": seat, "live": live})
         return {"sessions": sessions}
 
+    def _infra_job(session_id: str, seat: dict | None, path: str) -> None:
+        """Pulling images takes a while; never make the guest wait on the claim."""
+        try:
+            seat_sync.infra_up(seat, session_id=session_id, cwd=path)
+        except Exception:
+            # The guest can retry from the chat; a cold stack is not a failed claim.
+            pass
+
     @app.post("/api/sessions/{session_id}/claim")
-    def claim(session_id: str, body: ClaimIn) -> dict:
+    def claim(session_id: str, body: ClaimIn, background_tasks: BackgroundTasks) -> dict:
         try:
             sess = store.claim(session_id, body.board_id)
         except KeyError as exc:
@@ -243,15 +278,37 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         item = store.board_item(body.board_id)
         project = (item or {}).get("project")
         path = (project or {}).get("local_path") if project else None
+        needs: list[str] = []
         if path:
             seat = store.seat(sess["seat_id"])
             try:
                 seat_sync.set_workspace(seat, path)
             except SeatSyncError as exc:
                 raise HTTPException(502, "seat did not switch to this project's folder") from exc
-        return {"session": sess, "item": item, "project": project}
+            detected = project_ops.detect(path)
+            needs = list(detected.get("needs") or [])
+            if project and detected.get("framework"):
+                store.set_project_framework(project["id"], detected["framework"])
+            if needs:
+                background_tasks.add_task(_infra_job, session_id, seat, path)
+        return {"session": sess, "item": item, "project": project, "infra": needs}
 
-    def _revoke_seat(seat: dict | None) -> None:
+    def _teardown_deployment(session_id: str | None) -> None:
+        """Ephemeral by policy: nothing a guest deployed outlives their seat."""
+        if not session_id:
+            return
+        live = store.deployment_for_session(session_id)
+        if not live or live.get("torn_down_at") or live.get("state") == "torn_down":
+            return
+        try:
+            result = deploy_ops.teardown(live)
+            detail = "; ".join(result.get("problems") or []) or None
+        except Exception as exc:
+            detail = str(exc)
+        store.mark_torn_down(live["id"], detail)
+
+    def _revoke_seat(seat: dict | None, session_id: str | None = None) -> None:
+        _teardown_deployment(session_id)
         try:
             seat_sync.revoke_session(seat)
         except SeatSyncError as exc:
@@ -262,6 +319,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         require_host(request, authorization)
         seen: set[str] = set()
         for seat in store.seats():
+            live = store._live_session(seat["id"])
+            _teardown_deployment((live or {}).get("id"))
             url = seat.get("agent_url") or ""
             if url in seen:
                 continue
@@ -275,7 +334,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         seat = store.seat(seat_id)
         if not seat:
             raise HTTPException(404, "unknown seat")
-        _revoke_seat(seat)
+        live = store._live_session(seat_id)
+        _revoke_seat(seat, (live or {}).get("id"))
         return {"seat": store.free_seat(seat_id)}
 
     def _host_test_job(
@@ -340,7 +400,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(404, "unknown session")
         item = store.board_item(sess["board_id"]) if sess.get("board_id") else None
         seat = store.seat(sess["seat_id"])
-        _revoke_seat(seat)
+        _revoke_seat(seat, session_id)
         done = store.complete(session_id)
         testing = bool((item or {}).get("spec"))
         if testing:
@@ -348,6 +408,75 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             background_tasks.add_task(_verify_job, session_id, seat, item)
             done = store.session(session_id)
         return {"session": done, "testing": testing, "item": item}
+
+    def _deploy_job(deployment_id: str, session_id: str, seat: dict | None, item: dict | None) -> None:
+        project = (item or {}).get("project") or {}
+        cwd = project.get("local_path")
+        try:
+            local_ok = bool(cwd) and Path(cwd).is_dir()
+            info = seat_sync.submit_solution(
+                seat, session_id=session_id, cwd=cwd, push=not local_ok, kind="deploy"
+            )
+            ref = info.get("ref")
+            source = info.get("toplevel") if local_ok else info.get("remote")
+            if not (ref and source):
+                raise DeployError("the seat did not pin a deployable ref")
+            result = deploy_ops.run(
+                session_id=session_id, source=str(source), ref=str(ref)
+            )
+        except (DeployError, SeatSyncError) as exc:
+            store.update_deployment(deployment_id, state="failed", detail=str(exc)[:1000])
+            return
+        except Exception as exc:  # never leave the phone polling "running"
+            store.update_deployment(deployment_id, state="failed", detail=str(exc)[:1000])
+            return
+        store.update_deployment(
+            deployment_id,
+            state="ready",
+            url=result["url"],
+            ref=str(info.get("ref") or ""),
+            detail=result.get("detail"),
+            resources=result.get("resources") or [],
+        )
+        # A preview that is up but broken is worth knowing about immediately.
+        spec = (item or {}).get("spec") or ""
+        if str(spec).strip():
+            try:
+                report = testgen.run_smoke(
+                    spec=spec,
+                    title=(item or {}).get("title") or "",
+                    url=result["url"],
+                    session_id=session_id,
+                )
+                store.set_test_report(session_id, report)
+            except Exception as exc:
+                store.update_deployment(
+                    deployment_id, detail=f"deployed; smoke test skipped: {exc}"[:1000]
+                )
+
+    @app.post("/api/sessions/{session_id}/deploy")
+    def deploy_session(
+        session_id: str, body: DeployIn, background_tasks: BackgroundTasks
+    ) -> dict:
+        sess = store.session(session_id)
+        if not sess:
+            raise HTTPException(404, "unknown session")
+        item = store.board_item(sess["board_id"]) if sess.get("board_id") else None
+        project = (item or {}).get("project") or {}
+        if not project.get("local_path"):
+            raise HTTPException(409, "this brief has no project to deploy")
+        seat = store.seat(sess["seat_id"])
+        record = store.start_deployment(
+            session_id=session_id, project_id=project.get("id")
+        )
+        background_tasks.add_task(_deploy_job, record["id"], session_id, seat, item)
+        return {"deployment": record}
+
+    @app.get("/api/sessions/{session_id}/deployment")
+    def get_deployment(session_id: str) -> dict:
+        if not store.session(session_id):
+            raise HTTPException(404, "unknown session")
+        return {"session_id": session_id, "deployment": store.deployment_for_session(session_id)}
 
     @app.get("/api/sessions/{session_id}/tests")
     def session_tests(session_id: str) -> dict:

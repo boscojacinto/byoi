@@ -39,6 +39,12 @@ class SubmitIn(BaseModel):
     session_id: str
     cwd: str | None = None
     push: bool = False
+    kind: str = "submission"
+
+
+class InfraIn(BaseModel):
+    session_id: str
+    cwd: str | None = None
 
 
 app = FastAPI(title="BYOI seat control")
@@ -109,12 +115,21 @@ def admit(request: Request, body: AdmitIn, authorization: str | None = Header(de
 @app.post("/local/revoke")
 def revoke(request: Request, authorization: str | None = Header(default=None)) -> dict:
     _require_host(request, authorization)
+    # Grab the session before the gate forgets it — the local stack is keyed on it.
+    session_id = gate.snapshot().get("session_id")
     gate.revoke()
     from .claude_chat import session as chat_session
+    from .infra import down
 
     chat_session.reset()
     chat_session.assign_account(None)
-    return {"ok": True, "seat_id": SEAT_ID, "admitted": False}
+    infra = {"removed": False}
+    if session_id:
+        try:
+            infra = down(str(session_id))
+        except Exception as exc:  # teardown must never block freeing the seat
+            infra = {"ok": False, "removed": False, "detail": str(exc)}
+    return {"ok": True, "seat_id": SEAT_ID, "admitted": False, "infra": infra}
 
 
 @app.post("/local/workspace")
@@ -177,7 +192,9 @@ async def submit(
     if not cwd:
         raise HTTPException(409, "seat has no workspace for this session")
     try:
-        captured = capture(cwd=cwd, session_id=body.session_id, push=body.push)
+        captured = capture(
+            cwd=cwd, session_id=body.session_id, push=body.push, kind=body.kind
+        )
     except SubmissionError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {
@@ -186,6 +203,41 @@ async def submit(
         "transcript_path": (hook or {}).get("transcript_path"),
         **captured,
     }
+
+
+@app.post("/local/infra/up")
+def infra_up(request: Request, body: InfraIn, authorization: str | None = Header(default=None)) -> dict:
+    """Start this session's Postgres/Redis/auth and write them into .env.local."""
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+    from .infra import InfraError, public_env, up
+
+    cwd = body.cwd or (str(chat_session.workspace_path) if chat_session.workspace_path else None)
+    if not cwd:
+        raise HTTPException(409, "seat has no workspace for this session")
+    try:
+        env = up(session_id=body.session_id, cwd=cwd)
+    except InfraError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "seat_id": SEAT_ID, "cwd": cwd, "env": public_env(env)}
+
+
+@app.post("/local/infra/down")
+def infra_down(request: Request, body: InfraIn, authorization: str | None = Header(default=None)) -> dict:
+    _require_host(request, authorization)
+    from .infra import down
+
+    return {"seat_id": SEAT_ID, **down(body.session_id)}
+
+
+@app.get("/local/infra")
+def infra_status(
+    request: Request, session_id: str, authorization: str | None = Header(default=None)
+) -> dict:
+    _require_host(request, authorization)
+    from .infra import status
+
+    return {"seat_id": SEAT_ID, "session_id": session_id, **status(session_id)}
 
 
 @app.post("/local/verify")

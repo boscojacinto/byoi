@@ -58,6 +58,8 @@ const state = {
   timerId: null,
   testStatus: null,
   testReport: null,
+  deployment: null,
+  deploying: false,
 };
 
 function loadStore() {
@@ -810,6 +812,8 @@ function floorHTML() {
         }
         ${state.status ? `<p class="status">${escapeHtml(state.status)}</p>` : ""}
         <button class="btn" id="open-chat" ${state.busy || !session ? "disabled" : ""}>${state.busy ? "Opening…" : "Chat"}</button>
+        ${session && claimed && claimed.project ? `<button class="btn ghost" id="deploy" ${state.deploying ? "disabled" : ""}>${state.deploying ? "Deploying…" : "Deploy preview"}</button>` : ""}
+        ${deployHTML()}
         ${session ? `<button class="btn ghost" id="shipped">I'm done</button>` : ""}
         <button class="btn ghost" id="leave">Leave</button>
       </div>
@@ -821,6 +825,52 @@ function floorHTML() {
       </div>
     </section>
   </div>`;
+}
+
+function deployHTML() {
+  const d = state.deployment;
+  if (!d) return "";
+  if (d.state === "running") return `<p class="status">deploying · building your preview</p>`;
+  if (d.state === "failed") return `<p class="status">deploy failed · ${escapeHtml(d.detail || "unknown error")}</p>`;
+  if (d.state === "torn_down") return `<p class="status">preview was taken down at checkout</p>`;
+  if (d.url) {
+    return `<p class="status">preview live · <a href="${escapeHtml(d.url)}" target="_blank" rel="noreferrer">${escapeHtml(d.url)}</a></p>`;
+  }
+  return "";
+}
+
+async function deploy() {
+  if (!state.join?.session || state.deploying) return;
+  state.deploying = true;
+  state.status = "deploying…";
+  render();
+  try {
+    const data = await api(`/api/sessions/${state.join.session.id}/deploy`, {
+      method: "POST",
+      body: JSON.stringify({ production: false }),
+    });
+    state.deployment = data.deployment;
+    pollDeployment();
+  } catch (err) {
+    state.deploying = false;
+    state.status = err.message;
+  }
+  render();
+}
+
+async function pollDeployment() {
+  if (!state.join?.session) return;
+  try {
+    const data = await api(`/api/sessions/${state.join.session.id}/deployment`);
+    state.deployment = data.deployment;
+    const live = data.deployment && data.deployment.state === "running";
+    state.deploying = Boolean(live);
+    if (!live) state.status = "";
+    render();
+    if (live) setTimeout(pollDeployment, 3000);
+  } catch {
+    state.deploying = false;
+  }
 }
 
 function resultsHTML() {
@@ -981,6 +1031,8 @@ function bind() {
   }
   const ship = $("#shipped");
   if (ship) ship.onclick = shipped;
+  const dep = $("#deploy");
+  if (dep) dep.onclick = deploy;
   document.querySelectorAll("[data-fold]").forEach((btn) => {
     btn.onclick = () => {
       const fold = document.getElementById(btn.getAttribute("data-fold"));
