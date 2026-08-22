@@ -31,7 +31,7 @@ export default function FloorScreen({
           ) : null}
           {session ? (
             <Text style={styles.mono}>
-              tmux {seat?.claude_label || "claude-guest"} · otp {session.unlock_otp}
+              Claude Code on this seat · otp {session.unlock_otp}
             </Text>
           ) : null}
 
@@ -42,6 +42,7 @@ export default function FloorScreen({
               <Text style={styles.briefBody}>{claimed.brief}</Text>
               <Text style={styles.pill}>
                 {claimed.wellness_minutes} min · break {claimed.break_after}
+                {claimed.project ? ` · ${claimed.project.name}` : ""}
               </Text>
             </View>
           ) : null}
@@ -53,7 +54,7 @@ export default function FloorScreen({
             onPress={onAttach}
             disabled={busy || !session}
           >
-            <Text style={styles.btnText}>Attach TTY</Text>
+            <Text style={styles.btnText}>Open chat</Text>
           </Pressable>
           <Pressable style={styles.btnGhost} onPress={onLeave}>
             <Text style={styles.btnGhostText}>Leave seat</Text>
@@ -66,6 +67,7 @@ export default function FloorScreen({
               <Text style={styles.briefBody}>{item.brief}</Text>
               <Text style={styles.pill}>
                 {item.wellness_minutes} min · break at {item.break_after}
+                {item.project ? ` · ${item.project.name}` : ""}
               </Text>
               <Pressable
                 style={[styles.claim, (!session || busy) && styles.btnDisabled]}

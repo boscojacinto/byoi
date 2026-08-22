@@ -9,6 +9,21 @@ def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
 
 
+def test_desk_claude_accounts_and_missing_handoff(tmp_path: Path):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    accounts = client.get("/api/claude-accounts", headers=headers)
+    assert accounts.status_code == 200
+    assert "accounts" in accounts.json()
+    check = client.post(
+        "/api/sessions/check-in",
+        json={"seat_id": "seat-1", "coder_name": "Ada"},
+        headers=headers,
+    )
+    sid = check.json()["session"]["id"]
+    assert client.get(f"/api/sessions/{sid}/handoff").status_code == 404
+
+
 def test_health_and_seed_board(tmp_path: Path):
     client = _client(tmp_path)
     assert client.get("/api/health").json()["ok"] is True
@@ -16,6 +31,14 @@ def test_health_and_seed_board(tmp_path: Path):
     assert len(items) >= 3
     seats = client.get("/api/seats").json()["seats"]
     assert {s["id"] for s in seats} >= {"seat-1", "seat-2", "seat-3"}
+
+
+def test_loopback_desk_does_not_need_bearer(tmp_path: Path):
+    """Same-machine operator at 127.0.0.1:8080 — no token paste."""
+    desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    res = desk.post("/api/board", json={"title": "Loopback brief", "brief": "from the desk PC"})
+    assert res.status_code == 200
+    assert res.json()["title"] == "Loopback brief"
 
 
 def test_host_can_add_brief(tmp_path: Path):
@@ -41,6 +64,16 @@ def test_checkin_claim_complete_and_slip_dump(tmp_path: Path):
     body = check.json()
     assert body["print"]["mode"] == "dump"
     assert Path(body["print"]["png"]).is_file()
+    assert Path(body["qr"]).is_file()
+    qr = client.get("/last-qr.png")
+    assert qr.status_code == 200
+    assert qr.headers["content-type"].startswith("image/png")
+    from PIL import Image
+    import io
+
+    img = Image.open(io.BytesIO(qr.content))
+    assert img.size[0] == img.size[1]
+    assert img.size[0] >= 200
     assert "otp=" in body["join"]
     assert body["otp"]
     assert f"otp={body['otp']}" in body["join"]
@@ -121,3 +154,44 @@ def test_join_otp(tmp_path: Path):
     assert body["session"]["coder_name"] == "Lin"
     assert body["wifi_ssid"]
     assert "192.168.44.1" not in (body.get("seat_agent") or "")
+
+
+def test_desk_tabs_floor_solutions_live(tmp_path: Path):
+    html = _client(tmp_path).get("/").text
+    assert 'data-pane="floor"' in html
+    assert 'data-pane="solutions"' in html
+    assert 'data-pane="live"' in html
+    assert "Sit a guest" in html
+    assert "Wellness" not in html
+    assert ">Queue<" not in html
+    assert 'id="sitModal"' in html
+    assert 'id="qr"' in html
+
+
+def test_api_live_mirrors_guest_history(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    monkeypatch.setattr(
+        "apps.api.seat_sync.live_snapshot",
+        lambda seat: {
+            "history": [{"type": "user", "text": "ls"}, {"type": "assistant", "text": "apps/"}],
+            "cwd": "/tmp/salon",
+            "busy": False,
+            "model": "opus",
+        },
+    )
+    empty = client.get("/api/live", headers=headers)
+    assert empty.status_code == 200
+    assert empty.json()["sessions"] == []
+    assert client.post(
+        "/api/sessions/check-in",
+        json={"seat_id": "seat-1", "coder_name": "Ada"},
+        headers=headers,
+    ).status_code == 200
+    live = client.get("/api/live", headers=headers)
+    assert live.status_code == 200
+    sessions = live.json()["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["seat"]["id"] == "seat-1"
+    assert sessions[0]["live"]["history"][0]["text"] == "ls"
+    assert client.get("/api/live").status_code == 401

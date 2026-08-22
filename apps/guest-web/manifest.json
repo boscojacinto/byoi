@@ -1,0 +1,19 @@
+{
+  "name": "BYOI Guest",
+  "short_name": "BYOI",
+  "description": "Chat with Claude Code on your cafe seat — no terminal.",
+  "start_url": "/guest/",
+  "scope": "/guest/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4efe4",
+  "theme_color": "#5c3317",
+  "icons": [
+    {
+      "src": "/guest/icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-"""Seat-side OTP gate. Host admits an OTP; guests must present it to attach tmux."""
+"""Seat-side OTP gate. Host admits an OTP; guests present it to open chat."""
 
 from __future__ import annotations
 

@@ -14,7 +14,7 @@ import { guessSeatBase, normalizeBase, parseJoinUrl } from "./joinUrl";
 import FloorScreen from "./screens/FloorScreen";
 import JoinScreen from "./screens/JoinScreen";
 import ScanScreen from "./screens/ScanScreen";
-import TermScreen from "./screens/TermScreen";
+import ChatScreen from "./screens/ChatScreen";
 
 const LAST_SEAT = "byoi.seatBase";
 
@@ -105,7 +105,7 @@ export default function App() {
         session: data.session || prev.session,
         item: data.item || prev.item,
       }));
-      setStatus("brief claimed · attach the TTY");
+      setStatus("brief claimed · open chat");
     } catch (err) {
       setStatus(err.message);
     } finally {
@@ -118,7 +118,7 @@ export default function App() {
     try {
       const data = await unlockSeat(base, otp, join?.session?.id);
       setTicket(data.ticket || "");
-      setScreen("term");
+      setScreen("chat");
     } catch (err) {
       setStatus(err.message);
     } finally {
@@ -158,8 +158,8 @@ export default function App() {
     );
   }
 
-  if (screen === "term" && base) {
-    return <TermScreen base={base} ticket={ticket} onClose={() => setScreen("floor")} />;
+  if (screen === "chat" && base) {
+    return <ChatScreen base={base} ticket={ticket} otp={otp} onClose={() => setScreen("floor")} />;
   }
 
   if (screen === "floor") {

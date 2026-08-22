@@ -1,16 +1,52 @@
 import pytest
 
+from apps.seat.claude_chat import session as chat_session
 from apps.seat.gate import gate
 
 
 @pytest.fixture(autouse=True)
 def _reset_seat_gate():
     gate.reset()
+    chat_session.reset()
+    chat_session.workspace_path = None
+    chat_session.account_label = None
+    chat_session.config_dir = None
     yield
     gate.reset()
+    chat_session.reset()
+    chat_session.workspace_path = None
+    chat_session.account_label = None
+    chat_session.config_dir = None
 
 
 @pytest.fixture(autouse=True)
 def _seat_sync_ok(monkeypatch):
     monkeypatch.setattr("apps.api.seat_sync.admit_session", lambda *a, **k: {"ok": True})
     monkeypatch.setattr("apps.api.seat_sync.revoke_session", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(
+        "apps.api.seat_sync.verify_solution",
+        lambda *a, **k: {"summary": "stub", "passed": 0, "failed": 0, "cases": []},
+    )
+    monkeypatch.setattr(
+        "apps.api.seat_sync.live_snapshot",
+        lambda *a, **k: {"history": [], "busy": False, "cwd": "/tmp", "model": ""},
+    )
+    monkeypatch.setattr(
+        "apps.api.seat_sync.list_accounts",
+        lambda *a, **k: {"accounts": [], "account": None, "quota": None, "handoff": False},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_token(monkeypatch):
+    """Don't pick up data/tls/host.token from a live salon box."""
+    monkeypatch.setenv("BYOI_HOST_TOKEN", "byoi-host")
+    monkeypatch.delenv("BYOI_HOST_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("BYOI_TLS_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_accounts(tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path_factory.mktemp("claude-accounts")))
+    monkeypatch.setenv("BYOI_HANDOFFS_DIR", str(tmp_path_factory.mktemp("handoffs")))

@@ -21,6 +21,20 @@ class AdmitIn(BaseModel):
     seat_id: str | None = None
 
 
+class WorkspaceIn(BaseModel):
+    path: str
+
+
+class VerifyIn(BaseModel):
+    spec: str
+    title: str = ""
+    cwd: str | None = None
+
+
+class AccountIn(BaseModel):
+    label: str
+
+
 app = FastAPI(title="BYOI seat control")
 
 
@@ -45,7 +59,26 @@ def _require_host(request: Request, authorization: str | None) -> None:
 
 @app.get("/local/control-health")
 def health() -> dict:
-    return {"ok": True, "seat_id": SEAT_ID, "mtls": True, "tmux": SESSION, **gate.snapshot()}
+    from .claude_chat import session as chat_session
+
+    return {
+        "ok": True,
+        "seat_id": SEAT_ID,
+        "mtls": True,
+        "tmux": SESSION,
+        "account": chat_session.account_label,
+        "accounts": chat_session.pool.snapshot(current=chat_session.account_label),
+        **gate.snapshot(),
+    }
+
+
+@app.get("/local/live")
+def live(request: Request, authorization: str | None = Header(default=None)) -> dict:
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+
+    snap = chat_session.snapshot()
+    return {"seat_id": SEAT_ID, "gate": gate.snapshot(), **snap}
 
 
 @app.post("/local/admit")
@@ -60,11 +93,76 @@ def admit(request: Request, body: AdmitIn, authorization: str | None = Header(de
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {**admitted, "seat_id": SEAT_ID}
+    from .claude_chat import session as chat_session
+
+    chat_session.reset()
+    account = chat_session.assign_preferred(body.seat_id or SEAT_ID)
+    return {**admitted, "seat_id": SEAT_ID, "account": account.label if account else None}
 
 
 @app.post("/local/revoke")
 def revoke(request: Request, authorization: str | None = Header(default=None)) -> dict:
     _require_host(request, authorization)
     gate.revoke()
+    from .claude_chat import session as chat_session
+
+    chat_session.reset()
+    chat_session.assign_account(None)
     return {"ok": True, "seat_id": SEAT_ID, "admitted": False}
+
+
+@app.post("/local/workspace")
+def set_workspace(request: Request, body: WorkspaceIn, authorization: str | None = Header(default=None)) -> dict:
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+
+    try:
+        path = chat_session.set_workspace(body.path)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    return {"ok": True, "cwd": str(path), "seat_id": SEAT_ID}
+
+
+@app.get("/local/accounts")
+def list_accounts(request: Request, authorization: str | None = Header(default=None)) -> dict:
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+
+    return {
+        "seat_id": SEAT_ID,
+        "account": chat_session.account_label,
+        "quota": chat_session.quota,
+        "accounts": chat_session.pool.snapshot(current=chat_session.account_label),
+        "handoff": bool(chat_session.handoff_text),
+    }
+
+
+@app.post("/local/account")
+async def switch_account(
+    request: Request, body: AccountIn, authorization: str | None = Header(default=None)
+) -> dict:
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+
+    account = chat_session.pool.get(body.label)
+    if account is None or not account.credentialed:
+        raise HTTPException(404, "unknown Claude account")
+    await chat_session.switch_account(account, reason="host")
+    return {"ok": True, "seat_id": SEAT_ID, **chat_session.snapshot()}
+
+
+@app.post("/local/verify")
+def verify(request: Request, body: VerifyIn, authorization: str | None = Header(default=None)) -> dict:
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+    from .verify import run_verify
+
+    cwd = body.cwd or (str(chat_session.workspace_path) if chat_session.workspace_path else None)
+    try:
+        return run_verify(spec=body.spec, title=body.title, cwd=cwd)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc

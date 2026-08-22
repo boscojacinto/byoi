@@ -35,6 +35,8 @@ def want_control_server() -> bool:
 
 
 def control_config(*, host: str | None = None, port: int | None = None) -> uvicorn.Config:
+    # log_config/log_level must not clobber the guest uvicorn logger — that hid
+    # "Application startup complete" and made run-seat.sh look hung.
     return uvicorn.Config(
         app=control.app,
         host=host or control_bind(),
@@ -43,7 +45,8 @@ def control_config(*, host: str | None = None, port: int | None = None) -> uvico
         ssl_keyfile=str(paths().seat_key),
         ssl_ca_certs=str(paths().ca),
         ssl_cert_reqs=ssl.CERT_REQUIRED,
-        log_level="warning",
+        log_config=None,
+        log_level=None,
         lifespan="off",
         access_log=False,
     )

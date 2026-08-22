@@ -110,22 +110,51 @@ pytest
 
 ## Salon (coding + wellness)
 
-Host web + coder PWA over cafe Wi-Fi: see [`docs/salon.md`](docs/salon.md).
-Each seat is a Claude Code **tmux TTY**. The guest phone and the seat PC
-share Wi-Fi; the TTY is HTTP + WebSocket on `:8787`.
+Cafe floor: a **desk** checks guests in and prints a slip, a **seat PC** runs
+Claude Code, and the **guest phone** is a chat PWA (not a terminal). Same
+Wi-Fi. Guests never log into Claude. Full notes: [`docs/salon.md`](docs/salon.md).
 
-```bash
-pip install -e ".[salon,dev]"
-PYTHONPATH=src:. uvicorn apps.api.main:app --host 0.0.0.0 --port 8080
-PYTHONPATH=src:. uvicorn apps.seat.main:app --host 0.0.0.0 --port 8787
+```
+Desk  :8080   check-in, floor, solution board
+Seat  :8786   HTTP UI on this PC (no cert warning)
+Seat  :8787   HTTPS guest PWA for phones
+Seat  :8788   mTLS control (desk → seat)
 ```
 
-Then `./scripts/salon-tls.sh` (private CA + host/seat certs + a non-default
-token) and open http://127.0.0.1:8080/ on the desk. The desk pushes each
-OTP to the seat over **mTLS** on `:8788`. Guests use **BYOI Guest** over
-**HTTPS** on `:8787` (same CA; seat cert SAN lists the LAN IP). Build the
-guest APK with `npx expo run:android` — Expo Go cannot trust the salon CA.
-On the seat PC, run `claude setup-token` once so guests never log in.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[salon,dev]"
+./scripts/salon-tls.sh
+./scripts/seat-claude-login.sh --account claude-seat-1   # then: claude setup-token
+./scripts/run-salon.sh           # desk
+./scripts/run-seat.sh            # seat UI + guest PWA
+```
+
+| Open on this PC | URL |
+|---|---|
+| Desk | http://127.0.0.1:8080/ |
+| Seat | http://127.0.0.1:8786/ |
+| Guest (phone) | `https://<seat-lan-ip>:8787/guest/` |
+
+Desk check-in is allowed from **127.0.0.1** on this machine (no token paste).
+Phones cannot use the desk page. The slip QR is `https://<seat-ip>:8787/join?otp=…`.
+
+**Floor / Solutions / Live.** Desk tabs: seats, the solution board, and a
+mirror of the guest session. **Sit a guest** opens a centered QR — the
+image is the join code only; the printer still gets the full thermal slip.
+On the phone: same Wi-Fi, scan, pick a solution, **Chat**. Claude Code runs
+on the seat; the phone is messages, tools, diffs, files, photos, plan/code
+modes, and a session timer.
+
+**Solutions.** Each board item can have a **project** (new GitHub repo, clone,
+or a folder on this PC). Claiming it sets the seat workspace to that folder.
+An optional **acceptance spec** runs when the guest taps **I'm done** — the
+seat grades the work and the phone shows pass/fail.
+
+`gh auth login` once if you create GitHub repos from the desk. New clones
+land in `data/projects/`. Phone browsers warn on the salon CA until
+`https://<seat-ip>:8787/ca.pem` is installed.
 
 ## What this is not
 

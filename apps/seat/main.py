@@ -1,8 +1,9 @@
-"""Seat agent: cafe Wi-Fi TTY, OTP-gated tmux attach."""
+"""Seat agent: cafe Wi-Fi guest PWA + OTP-gated Claude Code chat."""
 
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import socket
 import time
@@ -16,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .claude_chat import default_workspace, list_workspace, session as chat_session
 from .gate import gate
 from .pty_ws import attach_tmux
 from .tmux_claude import SESSION, ensure_session
@@ -29,6 +31,8 @@ UNLOCK_OPEN = os.environ.get("BYOI_UNLOCK_OPEN", "0") == "1"
 GUEST_USER = os.environ.get("BYOI_GUEST_USER", "guest")
 ROOT = Path(__file__).resolve().parents[2]
 CODER = ROOT / "apps" / "coder"
+GUEST_WEB = ROOT / "apps" / "guest-web"
+SEAT_WEB = ROOT / "apps" / "seat-web"
 
 
 def lan_ip() -> str:
@@ -81,6 +85,9 @@ async def _lifespan(application: FastAPI):
         start_rfcomm()
     control = spawn_control_task()
     _state["control_tls"] = bool(control) or tls_paths().seat_ready()
+    logging.getLogger("uvicorn.error").info(
+        "BYOI seat ready · guest PWA :8787 · control mTLS :8788"
+    )
     try:
         yield
     finally:
@@ -96,6 +103,7 @@ _state = {
     "transport": TRANSPORT,
     "tmux": SESSION,
     "claude": "idle",
+    "chat": "stream-json",
     "last_unlock": None,
     "control_tls": False,
 }
@@ -121,10 +129,17 @@ def _via() -> str:
     return "wifi"
 
 
-@app.get("/")
-def root(otp: str | None = None) -> RedirectResponse:
+def _guest_url(otp: str | None = None) -> str:
     q = f"?otp={otp}" if otp else ""
-    return RedirectResponse(url=f"/coder{q}")
+    return f"/guest/{q}"
+
+
+@app.get("/", response_class=HTMLResponse)
+def root() -> HTMLResponse:
+    index = SEAT_WEB / "index.html"
+    if index.is_file():
+        return HTMLResponse(index.read_text(encoding="utf-8"))
+    return HTMLResponse("<p>seat UI missing — try <a href='/guest/'>/guest/</a></p>")
 
 
 @app.get("/ca.pem")
@@ -140,7 +155,7 @@ def ca_pem() -> FileResponse:
 @app.get("/local/status")
 def status() -> dict:
     tmux = ensure_session()
-    _state["claude"] = "tmux" if tmux.get("tmux") else tmux.get("error")
+    _state["claude"] = "chat"
     out = {
         **_state,
         **tmux,
@@ -149,6 +164,8 @@ def status() -> dict:
         "lan": lan_ip(),
         "wifi": True,
         "otp_gate": True,
+        "guest": "/guest/",
+        "workspace": str(chat_session.workspace_path or default_workspace()),
         "control_port": int(os.environ.get("BYOI_CONTROL_PORT", "8788")),
     }
     if TRANSPORT == "rfcomm":
@@ -181,6 +198,8 @@ def unlock(request: Request, body: UnlockIn | None = None) -> dict:
         "seat_id": SEAT_ID,
         "via": _via(),
         "ticket": ticket,
+        "chat": f"/chat?ticket={ticket}",
+        "guest": f"/guest/?ticket={ticket}&view=chat",
         "term": f"/term?ticket={ticket}",
         "tty": f"/tty?ticket={ticket}",
         "ssh": _ssh_hint(),
@@ -194,14 +213,59 @@ def unlock(request: Request, body: UnlockIn | None = None) -> dict:
     return result
 
 
-@app.websocket("/term")
-async def term(ws: WebSocket) -> None:
+def _accept_guest_socket(ws: WebSocket) -> bool:
     client = ws.client.host if ws.client else ""
     if not client_allowed(client) and not UNLOCK_OPEN:
+        return False
+    return gate.check_ticket(ws.query_params.get("ticket"))
+
+
+def _require_ticket(ticket: str | None) -> None:
+    if not gate.check_ticket(ticket):
+        raise HTTPException(403, "unlock this seat first")
+
+
+@app.get("/local/handoff")
+def guest_handoff(request: Request, ticket: str) -> Response:
+    if not client_allowed(_request_host(request)) and not UNLOCK_OPEN:
+        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+    _require_ticket(ticket)
+    from .accounts import read_handoff
+
+    text = chat_session.handoff_text or read_handoff(gate.snapshot().get("session_id"))
+    if not text:
+        raise HTTPException(404, "no compact handoff yet")
+    return Response(text, media_type="text/markdown; charset=utf-8")
+
+
+@app.get("/local/workspace")
+def workspace_listing(request: Request, ticket: str, path: str = "") -> dict:
+    if not client_allowed(_request_host(request)) and not UNLOCK_OPEN:
+        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+    _require_ticket(ticket)
+    try:
+        return list_workspace(path)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.websocket("/chat")
+async def chat(ws: WebSocket) -> None:
+    if not _accept_guest_socket(ws):
         await ws.close(code=1008)
         return
-    ticket = ws.query_params.get("ticket")
-    if not gate.check_ticket(ticket):
+    await ws.accept()
+    try:
+        await chat_session.attach_client(ws)
+    except WebSocketDisconnect:
+        return
+
+
+@app.websocket("/term")
+async def term(ws: WebSocket) -> None:
+    if not _accept_guest_socket(ws):
         await ws.close(code=1008)
         return
     await ws.accept()
@@ -213,15 +277,12 @@ async def term(ws: WebSocket) -> None:
 
 @app.get("/join")
 def join(otp: str | None = None) -> RedirectResponse:
-    q = f"?otp={otp}" if otp else ""
-    return RedirectResponse(url=f"/coder{q}")
+    return RedirectResponse(url=_guest_url(otp))
 
 
-@app.get("/coder", response_class=HTMLResponse)
-def coder(otp: str | None = None) -> HTMLResponse:
-    index = CODER / "index.html"
-    html = index.read_text(encoding="utf-8") if index.is_file() else "<p>coder pwa missing</p>"
-    return HTMLResponse(html)
+@app.get("/coder")
+def coder(otp: str | None = None) -> RedirectResponse:
+    return RedirectResponse(url=_guest_url(otp))
 
 
 @app.get("/tty", response_class=HTMLResponse)
@@ -250,3 +311,9 @@ async def house_proxy(path: str, request: Request) -> Response:
         status_code=proxied.status_code,
         media_type=proxied.headers.get("content-type"),
     )
+
+
+if SEAT_WEB.is_dir():
+    app.mount("/seat/assets", StaticFiles(directory=SEAT_WEB), name="seat-web")
+if GUEST_WEB.is_dir():
+    app.mount("/guest", StaticFiles(directory=GUEST_WEB, html=True), name="guest-pwa")

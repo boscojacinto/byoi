@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import urlparse
 
 import qrcode
@@ -15,6 +16,14 @@ from peripage_a6.raster import render_text
 
 WIFI_SSID = os.environ.get("BYOI_WIFI_SSID", "salon Wi-Fi")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+# Widest the QR block may be on a 576px row. The real width lands on the nearest
+# whole number of pixels per module at or below this (see render_qr).
+QR_TARGET_PX = 420
+# Desk popup QR — large enough to scan from across the counter.
+SCREEN_QR_PX = 840
+# ISO/IEC 18004 requires a 4-module quiet zone. The slip used to ship 2.
+QR_QUIET_MODULES = 4
 
 
 def guest_scheme() -> str:
@@ -63,12 +72,59 @@ def join_base() -> str:
 
 
 def join_url(otp: str) -> str:
-    return f"{join_base()}/coder?otp={otp}"
+    return f"{join_base()}/guest/?otp={otp}"
 
 
 def seat_join_url(seat: dict, otp: str) -> str:
     base = public_base(seat.get("agent_url") or "http://127.0.0.1:8787")
     return f"{base}/join?otp={otp}"
+
+
+def render_qr(data: str, *, target_px: int = QR_TARGET_PX) -> tuple[Image.Image, dict]:
+    """Render a QR at a whole number of pixels per module, never rescaled.
+
+    Slips are thresholded rather than dithered, so a fractional rescale is not
+    survivable: at 33 modules scaled into 360px each module wanted 10.9px, the
+    threshold snapped edges to whichever side of the pixel they fell, and
+    neighbouring modules printed 10px and 11px wide. A phone reads that jitter
+    as grid drift, which good light hides and a cafe's does not. So the pitch is
+    chosen to divide evenly and the raster is handed to the print head as-is.
+
+    Returns the image plus the geometry, which the scan report asserts against.
+    """
+    qr = qrcode.QRCode(
+        border=QR_QUIET_MODULES,
+        box_size=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_Q,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
+    grid = len(qr.get_matrix())  # data modules plus quiet zone on both sides
+    box = max(1, target_px // grid)
+    qr.box_size = box
+    image = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    geometry = {
+        "version": qr.version,
+        "grid": grid,
+        "modules": grid - 2 * QR_QUIET_MODULES,
+        "px_per_module": box,
+        "quiet_modules": QR_QUIET_MODULES,
+        "size_px": image.size[0],
+        "module_mm": round(box / A6_304.dpi * 25.4, 3),
+        "error_correction": "Q",
+    }
+    if image.size != (box * grid, box * grid):
+        raise ValueError(f"QR raster {image.size} is not {box}px/module on a {grid} grid")
+    return image, geometry
+
+
+def save_join_qr(join: str, dest_dir: Path, *, target_px: int = SCREEN_QR_PX) -> Path:
+    """Write a QR-only PNG for the desk popup (no slip text)."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    image, _ = render_qr(join, target_px=target_px)
+    path = dest_dir / "last-qr.png"
+    image.save(path, format="PNG")
+    return path
 
 
 def compose_checkin_slip(
@@ -84,11 +140,7 @@ def compose_checkin_slip(
     join: str,
 ) -> Image.Image:
     width = A6_304.row_width
-    qr = qrcode.QRCode(border=2, box_size=6, error_correction=qrcode.constants.ERROR_CORRECT_M)
-    qr.add_data(join)
-    qr.make(fit=True)
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_img = qr_img.resize((360, 360))
+    qr_img, _ = render_qr(join)
 
     header = render_text(
         f"{salon}\n{seat_name}\n{coder_name}",
@@ -103,7 +155,7 @@ def compose_checkin_slip(
         "Open BYOI Guest · scan this QR",
         f"OTP  {otp}",
         hostport,
-        "App TTY → tmux claude-guest",
+        "Phone chat · Claude Code on this seat",
         f"Session {wellness_minutes} min · break after {break_after} min",
     ]
     body = render_text("\n".join(body_lines), font_size=22, margin=12)

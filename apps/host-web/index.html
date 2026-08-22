@@ -3,45 +3,122 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BYOI salon · host</title>
+  <title>Salon</title>
   <link rel="stylesheet" href="/host/assets/salon.css" />
 </head>
-<body>
-  <header class="mast">
-    <div>
-      <p class="eyebrow">coding + wellness</p>
-      <h1>BYOI salon</h1>
-    </div>
-    <p class="token-hint">Host token in localStorage <code>byoiHostToken</code> — use the value from <code>scripts/salon-tls.sh</code> (<code>data/tls/host.token</code>), not the old default.</p>
+<body class="desk">
+  <header class="top">
+    <a class="brand" href="/">
+      <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
+        <path fill="#3dff8a" d="M16 3c5 6 9 11 9 16a9 9 0 1 1-18 0c0-5 4-10 9-16z"/>
+        <path fill="#0c120e" d="M16 12c2.2 3 4 5.4 4 7.6A4 4 0 1 1 12 19.6C12 17.4 13.8 15 16 12z"/>
+      </svg>
+      <span>Salon <em>cafe · code</em></span>
+    </a>
+    <nav>
+      <button type="button" class="tab is-on" data-pane="floor">Floor</button>
+      <button type="button" class="tab" data-pane="solutions">Solutions</button>
+      <button type="button" class="tab" data-pane="live">Live</button>
+    </nav>
+    <button type="button" class="cta" id="openSit">Sit a guest</button>
   </header>
-  <main class="grid">
-    <section class="panel">
-      <h2>Floor</h2>
-      <p class="msg">Guests sit in the <strong>BYOI Guest</strong> phone app — same Wi-Fi, scan the slip QR.</p>
-      <div id="seats" class="seats"></div>
-      <p class="row"><button type="button" id="freeAll">Free all seats</button></p>
-      <form id="checkin" class="row">
-        <select id="seatSel" required></select>
-        <input id="coderName" placeholder="vibe coder name" required />
-        <button type="submit">Check in + print slip</button>
-      </form>
-      <p id="checkinMsg" class="msg"></p>
-      <img id="slip" alt="last slip" hidden />
-    </section>
-    <section class="panel">
-      <h2>Solution board</h2>
-      <div id="board"></div>
-      <form id="newBrief">
-        <input name="title" placeholder="brief title" required />
-        <textarea name="brief" placeholder="what shipping looks like" required></textarea>
-        <div class="row">
-          <label>session min <input type="number" name="wellness_minutes" value="90" min="15" /></label>
-          <label>break after <input type="number" name="break_after" value="50" min="10" /></label>
-          <button type="submit">Publish</button>
+
+  <main class="dash">
+    <section class="pane is-on" id="pane-floor">
+      <article class="card floor-hero">
+        <p class="eyebrow">Floor</p>
+        <div id="today" class="today"></div>
+      </article>
+      <article class="card floor-seats">
+        <div class="card-head">
+          <h2>Seats</h2>
+          <button type="button" class="text" id="freeAll">Clear</button>
         </div>
-      </form>
+        <div id="seats" class="seats"></div>
+      </article>
+    </section>
+
+    <section class="pane" id="pane-solutions">
+      <article class="card solutions-card">
+        <div class="card-head">
+          <h2>Solutions</h2>
+          <button type="button" class="text" id="openAdd">Add</button>
+        </div>
+        <div id="board" class="queue"></div>
+      </article>
+    </section>
+
+    <section class="pane" id="pane-live">
+      <article class="card live-card">
+        <div class="card-head">
+          <h2>Live</h2>
+          <div id="liveSeats" class="live-seats"></div>
+        </div>
+        <div id="live" class="term empty" aria-live="polite"><ol><li>loading guest session…</li></ol></div>
+      </article>
     </section>
   </main>
+
+  <aside class="modal" id="sitModal" hidden>
+    <div class="modal-card" role="dialog" aria-labelledby="sitTitle" aria-modal="true">
+      <div class="card-head">
+        <h2 id="sitTitle">Sit a guest</h2>
+        <button type="button" class="text" id="closeSit">Close</button>
+      </div>
+      <form id="checkin" class="checkin">
+        <select id="seatSel" required></select>
+        <input id="coderName" placeholder="Guest name" required autocomplete="name" />
+        <button type="submit">Print slip</button>
+      </form>
+      <p id="checkinMsg" class="quiet"></p>
+      <div class="qr-stage" id="qrStage" hidden>
+        <img id="qr" alt="Join QR" />
+      </div>
+    </div>
+  </aside>
+
+  <aside class="modal" id="addDrawer" hidden>
+    <div class="modal-card drawer-card">
+      <div class="card-head">
+        <h2>New solution</h2>
+        <button type="button" class="text" id="closeAdd">Close</button>
+      </div>
+      <form id="newBrief">
+        <input name="title" placeholder="Title" required />
+        <textarea name="brief" placeholder="What done looks like" required></textarea>
+        <textarea name="spec" placeholder="How we’ll know it works (optional)"></textarea>
+        <select name="project_id" id="projectSel"><option value="">Project</option></select>
+        <div class="row">
+          <label>Minutes <input type="number" name="wellness_minutes" value="90" min="15" /></label>
+          <label>Break <input type="number" name="break_after" value="50" min="10" /></label>
+          <button type="submit">Add</button>
+        </div>
+      </form>
+      <details class="add">
+        <summary>New project</summary>
+        <form id="newProject">
+          <p class="row">
+            <label><input type="radio" name="kind" value="github" checked /> GitHub</label>
+            <label><input type="radio" name="kind" value="clone" /> Clone</label>
+            <label><input type="radio" name="kind" value="local" /> Folder</label>
+          </p>
+          <input name="name" placeholder="Name" />
+          <input name="url" placeholder="GitHub link" />
+          <input name="path" placeholder="Folder on this computer" />
+          <label class="row"><input type="checkbox" name="private" checked /> Private</label>
+          <button type="submit">Save project</button>
+          <p id="projectMsg" class="quiet"></p>
+        </form>
+      </details>
+    </div>
+  </aside>
+
+  <footer class="health">
+    <span>Floor</span>
+    <div class="bar"><i id="healthBar"></i></div>
+    <span id="healthDesk">Desk</span>
+    <span id="healthSeats">Seats</span>
+  </footer>
   <script src="/host/assets/host.js"></script>
 </body>
 </html>

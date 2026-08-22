@@ -45,7 +45,8 @@ def _client() -> httpx.Client:
     p = paths()
     if not p.host_ready():
         raise SeatSyncError(503, "missing salon TLS files — run scripts/salon-tls.sh")
-    return httpx.Client(verify=host_ssl_context(), timeout=8.0)
+    timeout = 8.0
+    return httpx.Client(verify=host_ssl_context(), timeout=timeout)
 
 
 def admit_session(seat: dict[str, Any], sess: dict[str, Any]) -> dict[str, Any]:
@@ -64,6 +65,62 @@ def admit_session(seat: dict[str, Any], sess: dict[str, Any]) -> dict[str, Any]:
     if res.status_code >= 400:
         raise SeatSyncError(res.status_code, res.text)
     return res.json() if res.content else {"ok": True}
+
+
+def set_workspace(seat: dict[str, Any] | None, path: str) -> dict[str, Any]:
+    url = control_base(seat) + "/local/workspace"
+    try:
+        with _client() as client:
+            res = client.post(url, json={"path": path}, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {"ok": True}
+
+
+def verify_solution(
+    seat: dict[str, Any] | None,
+    *,
+    spec: str,
+    title: str = "",
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    url = control_base(seat) + "/local/verify"
+    payload = {"spec": spec, "title": title, "cwd": cwd}
+    try:
+        with httpx.Client(verify=host_ssl_context(), timeout=200.0) as client:
+            res = client.post(url, json=payload, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {"cases": []}
+
+
+def live_snapshot(seat: dict[str, Any] | None) -> dict[str, Any]:
+    """Guest chat history on this seat — used by the desk Live pane."""
+    url = control_base(seat) + "/local/live"
+    try:
+        with _client() as client:
+            res = client.get(url, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {"history": []}
+
+
+def list_accounts(seat: dict[str, Any] | None = None) -> dict[str, Any]:
+    url = control_base(seat) + "/local/accounts"
+    try:
+        with _client() as client:
+            res = client.get(url, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {"accounts": []}
 
 
 def revoke_session(seat: dict[str, Any] | None) -> dict[str, Any]:

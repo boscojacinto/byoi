@@ -25,6 +25,14 @@ def test_seat_cert_lists_loopback_ip(tmp_path, monkeypatch):
     assert "IP Address:127.0.0.1" in text or "IP:127.0.0.1" in text
 
 
+def test_control_config_does_not_silence_guest_logs():
+    from apps.seat.control_server import control_config
+
+    cfg = control_config(host="127.0.0.1", port=18788)
+    assert cfg.log_config is None
+    assert cfg.log_level is None
+
+
 def test_control_base_is_https_8788():
     assert control_base({"agent_url": "http://10.1.2.3:8787"}) == "https://10.1.2.3:8788"
     assert control_base({"agent_url": "http://127.0.0.1:8787"}) == "https://127.0.0.1:8788"

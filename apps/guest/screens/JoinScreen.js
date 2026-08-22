@@ -20,13 +20,13 @@ export default function JoinScreen({
           <Text style={styles.title}>Sit. Same Wi-Fi. Attach.</Text>
           <Text style={styles.lede}>
             This is the vibe-coder app. Join the cafe Wi-Fi, scan the slip, claim a
-            brief, attach the seat TTY. No browser, no Bluetooth.
+            brief, then chat with Claude Code on this seat. No terminal.
           </Text>
 
           <View style={styles.card}>
             <Text style={styles.step}>1. Same Wi-Fi as the seat PC.</Text>
             <Text style={styles.step}>2. Scan the check-in QR (or paste the join URL).</Text>
-            <Text style={styles.step}>3. Claim a brief, then attach tmux claude-guest.</Text>
+            <Text style={styles.step}>3. Claim a brief, then open chat — like the Claude app.</Text>
           </View>
 
           <Pressable style={styles.btn} onPress={onScan} disabled={busy}>

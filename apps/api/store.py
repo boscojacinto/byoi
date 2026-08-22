@@ -20,6 +20,13 @@ CREATE TABLE IF NOT EXISTS seats (
     agent_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:8787',
     status TEXT NOT NULL DEFAULT 'idle'
 );
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    github TEXT,
+    local_path TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS board (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -27,7 +34,10 @@ CREATE TABLE IF NOT EXISTS board (
     wellness_minutes INTEGER NOT NULL DEFAULT 90,
     break_after INTEGER NOT NULL DEFAULT 50,
     published INTEGER NOT NULL DEFAULT 1,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    project_id TEXT,
+    spec TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -39,6 +49,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT NOT NULL DEFAULT 'checked_in',
     unlock_otp TEXT,
     rc_url TEXT,
+    test_status TEXT,
+    test_report TEXT,
     FOREIGN KEY (seat_id) REFERENCES seats(id)
 );
 CREATE TABLE IF NOT EXISTS print_jobs (
@@ -65,7 +77,7 @@ SEED_BOARD = [
     ),
     (
         "Join guide that a first-time Android guest can follow on cafe Wi-Fi",
-        "Rewrite the coder PWA so a phone on the same Wi-Fi as the seat PC can scan the slip and attach the TTY.",
+        "Rewrite the guest PWA so a phone on the same Wi-Fi as the seat PC can scan the slip and chat with Claude Code.",
         75,
         45,
     ),
@@ -86,8 +98,24 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate()
         self._seed()
         self._reconcile_occupancy()
+
+    def _columns(self, table: str) -> set[str]:
+        return {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate(self) -> None:
+        if "project_id" not in self._columns("board"):
+            self.conn.execute("ALTER TABLE board ADD COLUMN project_id TEXT")
+        if "spec" not in self._columns("board"):
+            self.conn.execute("ALTER TABLE board ADD COLUMN spec TEXT NOT NULL DEFAULT ''")
+        sess_cols = self._columns("sessions")
+        if "test_status" not in sess_cols:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN test_status TEXT")
+        if "test_report" not in sess_cols:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN test_report TEXT")
+        self.conn.commit()
 
     def _seed(self) -> None:
         n = self.conn.execute("SELECT COUNT(*) FROM seats").fetchone()[0]
@@ -114,7 +142,7 @@ class Store:
             "ORDER BY started_at DESC LIMIT 1",
             (seat_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return self._session_dict(row)
 
     def _reconcile_occupancy(self) -> None:
         """Seat status follows live sessions so a finished visit cannot stick as occupied."""
@@ -160,18 +188,73 @@ class Store:
         item["status"] = "occupied" if sess else "idle"
         return item
 
+    def _session_dict(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        raw = item.get("test_report")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                item["test_report"] = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        return item
+
+    def _with_project(self, item: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not item:
+            return None
+        pid = item.get("project_id")
+        item["project"] = self.project(pid) if pid else None
+        return item
+
+    def projects(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def project(self, project_id: str | None) -> dict[str, Any] | None:
+        if not project_id:
+            return None
+        row = self.conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_project(self, *, name: str, local_path: str, github: str | None = None) -> dict[str, Any]:
+        item = {
+            "id": str(uuid.uuid4())[:8],
+            "name": name.strip() or Path(local_path).name,
+            "github": (github or "").strip() or None,
+            "local_path": str(Path(local_path).expanduser()),
+            "created_at": time.time(),
+        }
+        self.conn.execute(
+            "INSERT INTO projects (id, name, github, local_path, created_at) "
+            "VALUES (:id,:name,:github,:local_path,:created_at)",
+            item,
+        )
+        self.conn.commit()
+        return item
+
     def board(self, published_only: bool = True) -> list[dict[str, Any]]:
         sql = "SELECT * FROM board"
         if published_only:
             sql += " WHERE published=1"
         sql += " ORDER BY created_at DESC"
-        return [dict(r) for r in self.conn.execute(sql).fetchall()]
+        return [self._with_project(dict(r)) for r in self.conn.execute(sql).fetchall()]  # type: ignore[misc]
 
     def board_item(self, item_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM board WHERE id=?", (item_id,)).fetchone()
-        return dict(row) if row else None
+        return self._with_project(dict(row) if row else None)
 
-    def add_board(self, title: str, brief: str, wellness_minutes: int, break_after: int) -> dict[str, Any]:
+    def add_board(
+        self,
+        title: str,
+        brief: str,
+        wellness_minutes: int,
+        break_after: int,
+        project_id: str | None = None,
+        spec: str = "",
+    ) -> dict[str, Any]:
+        if project_id and not self.project(project_id):
+            raise KeyError("unknown project")
         item = {
             "id": str(uuid.uuid4())[:8],
             "title": title,
@@ -180,14 +263,26 @@ class Store:
             "break_after": break_after,
             "published": 1,
             "created_at": time.time(),
+            "project_id": project_id,
+            "spec": (spec or "").strip(),
         }
         self.conn.execute(
-            "INSERT INTO board (id, title, brief, wellness_minutes, break_after, published, created_at) "
-            "VALUES (:id,:title,:brief,:wellness_minutes,:break_after,:published,:created_at)",
+            "INSERT INTO board (id, title, brief, wellness_minutes, break_after, published, created_at, project_id, spec) "
+            "VALUES (:id,:title,:brief,:wellness_minutes,:break_after,:published,:created_at,:project_id,:spec)",
             item,
         )
         self.conn.commit()
-        return item
+        return self.board_item(item["id"])  # type: ignore[return-value]
+
+    def set_board_project(self, board_id: str, project_id: str | None) -> dict[str, Any]:
+        item = self.board_item(board_id)
+        if not item:
+            raise KeyError("unknown board item")
+        if project_id and not self.project(project_id):
+            raise KeyError("unknown project")
+        self.conn.execute("UPDATE board SET project_id=? WHERE id=?", (project_id, board_id))
+        self.conn.commit()
+        return self.board_item(board_id)  # type: ignore[return-value]
 
     def check_in(self, seat_id: str, coder_name: str) -> dict[str, Any]:
         seat = self.seat(seat_id)
@@ -267,14 +362,33 @@ class Store:
 
     def session(self, session_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-        return dict(row) if row else None
+        return self._session_dict(row)
+
+    def set_test_running(self, session_id: str) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET test_status='running', test_report=NULL WHERE id=?",
+            (session_id,),
+        )
+        self.conn.commit()
+
+    def set_test_report(self, session_id: str, report: dict[str, Any]) -> dict[str, Any] | None:
+        failed = int(report.get("failed") or 0)
+        status = "failed" if failed else "passed"
+        if not report.get("cases"):
+            status = "passed" if not report.get("summary") else status
+        self.conn.execute(
+            "UPDATE sessions SET test_status=?, test_report=? WHERE id=?",
+            (status, json.dumps(report), session_id),
+        )
+        self.conn.commit()
+        return self.session(session_id)
 
     def session_by_otp(self, otp: str) -> dict[str, Any] | None:
         needle = (otp or "").strip().casefold()
         if not needle:
             return None
         row = self.conn.execute("SELECT * FROM sessions WHERE lower(unlock_otp)=?", (needle,)).fetchone()
-        return dict(row) if row else None
+        return self._session_dict(row)
 
     def set_rc_url(self, session_id: str, url: str) -> None:
         self.conn.execute("UPDATE sessions SET rc_url=? WHERE id=?", (url, session_id))
