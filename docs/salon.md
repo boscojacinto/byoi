@@ -147,8 +147,17 @@ CLAUDE_CONFIG_DIR=data/claude-accounts/claude-host claude setup-token
 ```
 
 On one PC the desk fetches the ref straight off the project folder. On two
-machines the seat pushes it to the project's `origin` first, so that path needs
-`gh auth login` (or a git credential helper) on the seat.
+machines the seat pushes it to the project's `origin` first, so the seat needs
+to be able to push there:
+
+| Project `origin` | What the seat needs |
+|---|---|
+| `git@github.com:…` (SSH) | An authorised SSH key. Nothing else. |
+| `https://github.com/…` | `gh auth login` on the seat, which installs a git credential helper |
+
+`gh` is only otherwise needed for **New project → GitHub**. If a push fails the
+desk falls back to the seat-side verifier and the report says which of the two
+fixes applies.
 
 The suite runs in **Docker** with `--network none`, a pids/memory/CPU cap, and an
 environment scrubbed of every `BYOI_*` value — guest code never sees `host.token`

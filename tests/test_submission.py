@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from apps.seat.submission import SubmissionError, capture, ref_for
+from apps.seat.submission import SubmissionError, capture, push_hint, ref_for
 
 
 def _repo(path: Path) -> Path:
@@ -72,3 +72,44 @@ def test_push_without_an_origin_is_a_precondition_error(tmp_path: Path):
     (repo / "f.txt").write_text("x\n")
     with pytest.raises(SubmissionError, match="no origin"):
         capture(cwd=repo, session_id="sid4", push=True)
+
+
+def test_push_hint_explains_an_https_remote_with_no_credentials():
+    msg = push_hint("fatal: Authentication failed for 'https://github.com/o/r/'", "https://github.com/o/r")
+    assert "gh auth login" in msg
+    assert "git remote set-url origin git@github.com" in msg
+    # The original git error is kept for anyone who wants it.
+    assert "Authentication failed" in msg
+
+
+def test_push_hint_points_at_the_ssh_key_for_an_ssh_remote():
+    msg = push_hint("git@github.com: Permission denied (publickey).", "git@github.com:o/r.git")
+    assert "SSH key is not authorised" in msg
+    assert "gh auth login" not in msg
+
+
+def test_push_hint_passes_unrelated_errors_through():
+    assert push_hint("fatal: the remote end hung up", "git@github.com:o/r.git") == (
+        "fatal: the remote end hung up"
+    )
+
+
+def test_push_failure_is_reported_with_the_hint(tmp_path: Path, monkeypatch):
+    repo = _repo(tmp_path / "proj")
+    (repo / "f.txt").write_text("x\n")
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/o/r"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+    real = subprocess.run
+
+    def fake(argv, **kwargs):
+        if argv[:2] == ["git", "push"]:
+            return subprocess.CompletedProcess(
+                argv, 128, "", "fatal: Authentication failed for 'https://github.com/o/r/'"
+            )
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    with pytest.raises(SubmissionError, match="gh auth login"):
+        capture(cwd=repo, session_id="sid", push=True)

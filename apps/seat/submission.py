@@ -62,6 +62,31 @@ def origin_url(cwd: Path) -> str | None:
     return url or None
 
 
+def push_hint(error: str, remote: str) -> str:
+    """Turn a git auth failure into something the operator can act on."""
+    lowered = (error or "").lower()
+    if (
+        "authentication failed" in lowered
+        or "could not read username" in lowered
+        or "publickey" in lowered
+    ):
+        if remote.startswith(("http://", "https://")):
+            return (
+                f"cannot push to {remote}: the seat has no credentials for it. Either run "
+                "`gh auth login` on the seat (it installs a git credential helper for https), "
+                "or switch the project to SSH with "
+                "`git remote set-url origin git@github.com:<owner>/<repo>.git`. "
+                f"[{error.strip()[:200]}]"
+            )
+        return (
+            f"cannot push to {remote}: the seat's SSH key is not authorised for it. "
+            f"[{error.strip()[:200]}]"
+        )
+    if "permission denied" in lowered or "denied to" in lowered:
+        return f"the seat is not allowed to push to {remote}. [{error.strip()[:200]}]"
+    return error
+
+
 def capture(
     *, cwd: str | Path, session_id: str, push: bool = False, kind: str = "submission"
 ) -> dict[str, Any]:
@@ -95,7 +120,10 @@ def capture(
     if push:
         if not remote:
             raise SubmissionError("this project has no origin to push the submission to")
-        _git("push", "--force", "origin", f"{ref}:{ref}", cwd=top)
+        try:
+            _git("push", "--force", "origin", f"{ref}:{ref}", cwd=top)
+        except SubmissionError as exc:
+            raise SubmissionError(push_hint(str(exc), remote)) from exc
         pushed = True
 
     return {
