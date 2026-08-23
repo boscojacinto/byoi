@@ -219,14 +219,20 @@ by guest code. The desk deploys from a checkout instead, at a moment when no
 guest code is running, and passes `vercel` a scrubbed environment. Tokens are
 redacted out of any error before it is stored or shown.
 
+Vercel gates preview deployments behind its own SSO by default, which would make
+the URL unopenable by the guest who built it and unreachable by the smoke suite.
+The desk turns that off for the project it creates (`BYOI_VERCEL_PUBLIC=0` keeps
+Vercel's default). Treat every preview as public.
+
 If the preview comes up and the brief has a spec, a **smoke suite** is generated
 from that spec and run against the live URL. That run gets network access, so it
 gets *only* the generated tests — the guest's tree is never in the directory.
 
 ### Teardown
 
-Ephemeral by policy: freeing the seat removes the deployment, destroys the
-provisioned database and cache, and brings the seat's local stack down. A
+Ephemeral by policy: freeing the seat removes the deployment, **deletes the
+Vercel project** so no build history lingers, destroys the provisioned database
+and cache, and brings the seat's local stack down. A
 failure at any step is recorded but never blocks freeing the seat.
 
 ### Credentials (desk only)

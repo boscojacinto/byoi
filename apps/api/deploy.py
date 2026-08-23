@@ -7,12 +7,15 @@ desk fetches that ref, provisions managed infrastructure, and only then runs
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from apps.secrets import read_secret
 
@@ -21,6 +24,7 @@ from . import provision as provisioning
 
 ROOT = Path(__file__).resolve().parents[2]
 URL_RE = re.compile(r"https://[^\s]+\.vercel\.app")
+VERCEL_API = "https://api.vercel.com"
 
 
 class DeployError(RuntimeError):
@@ -97,6 +101,60 @@ def _redact(text: str, token: str) -> str:
     return (text or "").replace(token, "***") if token else (text or "")
 
 
+def project_info(dest: Path) -> dict[str, str]:
+    """`vercel deploy` drops the ids it used into .vercel/project.json."""
+    path = dest / ".vercel" / "project.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        "projectId": str(data.get("projectId") or ""),
+        "orgId": str(data.get("orgId") or ""),
+    }
+
+
+def _api(method: str, path: str, *, token: str, json_body: Any = None) -> httpx.Response:
+    return httpx.request(
+        method,
+        f"{VERCEL_API}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+        json=json_body,
+        timeout=60.0,
+    )
+
+
+def make_public(project_id: str, *, token: str) -> str | None:
+    """Turn off Vercel's deployment protection for this project.
+
+    Previews are SSO-gated by default, which would make the URL unopenable by
+    the guest who built it and unreachable by the smoke suite. Returns a note
+    when it could not be turned off.
+    """
+    if not project_id:
+        return "no project id, left with Vercel's default protection"
+    try:
+        res = _api(
+            "PATCH",
+            f"/v9/projects/{project_id}",
+            token=token,
+            json_body={"ssoProtection": None, "passwordProtection": None},
+        )
+    except httpx.HTTPError as exc:
+        return f"could not disable deployment protection: {exc}"
+    if res.status_code >= 400:
+        return f"could not disable deployment protection: {res.status_code} {res.text[:160]}"
+    return None
+
+
+def delete_project(project_id: str, *, token: str) -> None:
+    if not project_id:
+        return
+    res = _api("DELETE", f"/v9/projects/{project_id}", token=token)
+    if res.status_code >= 400 and res.status_code != 404:
+        raise DeployError(f"could not delete project: {res.status_code} {res.text[:160]}")
+
+
 def fetch(*, source: str, ref: str, dest: Path) -> None:
     """Same checkout mechanism the acceptance suite uses."""
     from .testgen import TestgenError, fetch_submission
@@ -153,6 +211,17 @@ def run(
         provisioning.destroy(resources)
         raise DeployError("vercel did not print a deployment URL")
 
+    ids = project_info(dest)
+    if ids.get("projectId"):
+        # Recorded so teardown can remove the whole project, not just this build.
+        resources.append(
+            {"kind": "vercel_project", "provider": "vercel", "id": ids["projectId"], "env": {}}
+        )
+        if os.environ.get("BYOI_VERCEL_PUBLIC", "1") != "0":
+            problem = make_public(ids["projectId"], token=token)
+            if problem:
+                notes.append(problem)
+
     return {
         "url": match.group(0),
         "resources": resources,
@@ -179,5 +248,13 @@ def teardown(deployment: dict[str, Any]) -> dict[str, Any]:
                 )
         except DeployError as exc:
             problems.append(str(exc))
-    problems.extend(provisioning.destroy(deployment.get("resources") or []))
+    resources = deployment.get("resources") or []
+    for resource in resources:
+        if resource.get("kind") != "vercel_project":
+            continue
+        try:
+            delete_project(str(resource.get("id") or ""), token=_token())
+        except (DeployError, httpx.HTTPError) as exc:
+            problems.append(f"vercel project: {exc}")
+    problems.extend(provisioning.destroy(resources))
     return {"ok": not problems, "problems": problems}

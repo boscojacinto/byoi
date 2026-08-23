@@ -4,8 +4,11 @@ import pg from "pg";
 
 const url = process.env.DATABASE_URL;
 if (!url) {
-  console.error("DATABASE_URL is not set");
-  process.exit(1);
+  // Deploying without a managed database is a supported, degraded state: the
+  // salon says so in the report and /api/health reports the database down.
+  // Failing the build here would turn "no Neon key" into "nothing ships".
+  console.log("DATABASE_URL is not set — skipping schema bootstrap");
+  process.exit(0);
 }
 const client = new pg.Client({
   connectionString: url,

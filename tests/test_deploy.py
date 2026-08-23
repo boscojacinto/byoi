@@ -179,3 +179,116 @@ def test_destroy_is_best_effort(monkeypatch):
     monkeypatch.setitem(provision.DESTROYERS, "postgres", boom)
     problems = provision.destroy([{"kind": "postgres", "id": "x"}, {"kind": "auth"}])
     assert problems == ["postgres: api down"]
+
+
+# ------------------------------------------------------- deployment protection
+
+
+def test_project_info_reads_what_vercel_wrote(tmp_path):
+    (tmp_path / ".vercel").mkdir()
+    (tmp_path / ".vercel" / "project.json").write_text('{"projectId":"prj_1","orgId":"org_1"}')
+    assert deploy.project_info(tmp_path) == {"projectId": "prj_1", "orgId": "org_1"}
+
+
+def test_project_info_tolerates_a_missing_file(tmp_path):
+    assert deploy.project_info(tmp_path) == {}
+
+
+def test_make_public_turns_off_both_protections(monkeypatch):
+    seen: dict = {}
+
+    class Res:
+        status_code = 200
+        text = ""
+
+    def fake(method, path, *, token, json_body=None):
+        seen.update({"method": method, "path": path, "body": json_body})
+        return Res()
+
+    monkeypatch.setattr(deploy, "_api", fake)
+    assert deploy.make_public("prj_1", token="t") is None
+    assert seen["method"] == "PATCH"
+    assert seen["path"] == "/v9/projects/prj_1"
+    # Previews are SSO-gated by default; the guest must be able to open their own URL.
+    assert seen["body"] == {"ssoProtection": None, "passwordProtection": None}
+
+
+def test_make_public_reports_rather_than_raises(monkeypatch):
+    class Res:
+        status_code = 403
+        text = "forbidden"
+
+    monkeypatch.setattr(deploy, "_api", lambda *a, **k: Res())
+    note = deploy.make_public("prj_1", token="t")
+    assert note and "could not disable deployment protection" in note
+
+
+def test_make_public_without_a_project_id_is_a_note_not_a_crash():
+    assert "no project id" in (deploy.make_public("", token="t") or "")
+
+
+def test_deploy_records_the_project_and_unprotects_it(tmp_path, monkeypatch):
+    fake = _fake_bin(tmp_path, FAKE_VERCEL)
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
+    monkeypatch.setenv("BYOI_VERCEL", str(fake))
+    monkeypatch.setenv("BYOI_DEPLOY_RUNS_DIR", str(tmp_path / "runs"))
+    src = _repo(tmp_path / "proj", {"byoi.json": '{"framework":"nextjs","needs":[]}'})
+    from apps.seat.submission import capture
+
+    info = capture(cwd=src, session_id="sid", kind="deploy")
+    # Stand in for what the real CLI writes after a deploy.
+    dest = tmp_path / "runs" / "sid"
+    monkeypatch.setattr(
+        deploy, "project_info", lambda d: {"projectId": "prj_9", "orgId": "org_9"}
+    )
+    unprotected: list[str] = []
+    monkeypatch.setattr(
+        deploy, "make_public", lambda pid, token: unprotected.append(pid) or None
+    )
+    result = deploy.run(session_id="sid", source=info["toplevel"], ref=info["ref"])
+    assert unprotected == ["prj_9"]
+    assert {"kind": "vercel_project", "provider": "vercel", "id": "prj_9", "env": {}} in result["resources"]
+
+
+def test_public_can_be_switched_off(tmp_path, monkeypatch):
+    fake = _fake_bin(tmp_path, FAKE_VERCEL)
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
+    monkeypatch.setenv("BYOI_VERCEL", str(fake))
+    monkeypatch.setenv("BYOI_DEPLOY_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("BYOI_VERCEL_PUBLIC", "0")
+    src = _repo(tmp_path / "proj", {"byoi.json": '{"framework":"nextjs","needs":[]}'})
+    from apps.seat.submission import capture
+
+    info = capture(cwd=src, session_id="sid", kind="deploy")
+    monkeypatch.setattr(deploy, "project_info", lambda d: {"projectId": "prj_9"})
+    called: list[str] = []
+    monkeypatch.setattr(deploy, "make_public", lambda pid, token: called.append(pid))
+    deploy.run(session_id="sid", source=info["toplevel"], ref=info["ref"])
+    assert called == []
+
+
+def test_teardown_deletes_the_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
+    monkeypatch.setenv("BYOI_VERCEL", str(_fake_bin(tmp_path, FAKE_VERCEL)))
+    deleted: list[str] = []
+    monkeypatch.setattr(deploy, "delete_project", lambda pid, token: deleted.append(pid))
+    out = deploy.teardown(
+        {"url": "https://x.vercel.app", "resources": [{"kind": "vercel_project", "id": "prj_9"}]}
+    )
+    assert out["ok"] is True
+    assert deleted == ["prj_9"]
+
+
+def test_teardown_reports_a_project_it_could_not_delete(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
+    monkeypatch.setenv("BYOI_VERCEL", str(_fake_bin(tmp_path, FAKE_VERCEL)))
+
+    def boom(pid, token):
+        raise DeployError("409 in use")
+
+    monkeypatch.setattr(deploy, "delete_project", boom)
+    out = deploy.teardown(
+        {"url": "https://x.vercel.app", "resources": [{"kind": "vercel_project", "id": "prj_9"}]}
+    )
+    assert out["ok"] is False
+    assert "409 in use" in out["problems"][0]
