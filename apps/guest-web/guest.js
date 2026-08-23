@@ -63,6 +63,7 @@ const state = {
   byo: false,
   byoStage: "idle",
   byoUrl: "",
+  byoPowers: [],
   byoEmail: "",
   byoBusy: false,
   byoError: "",
@@ -282,7 +283,9 @@ function applyChatEvent(msg) {
     state.usage = msg.usage || state.usage;
     state.suggestions = msg.suggestions || state.suggestions;
     state.account = msg.account || state.account;
-    state.byo = !!msg.byo;
+    // The translator's own `ready` (on session init) carries no account fields —
+    // clobbering here would flip the phone back to "not signed in" mid-session.
+    if (msg.byo !== undefined) state.byo = !!msg.byo;
     state.quota = msg.quota || state.quota;
     state.handoffAvailable = !!msg.handoff || state.handoffAvailable;
     state.chatLabel = msg.busy ? "Working…" : msg.error || labelReady();
@@ -846,13 +849,16 @@ function byoHTML() {
       <h2>Running on your account</h2>
       <p class="lede">${state.byoEmail ? `Signed in as ${escapeHtml(state.byoEmail)}.` : "Signed in."} This session uses your Claude usage, not the salon's.</p>
       <p class="fine">Access is revoked and deleted when your session ends.</p>
+      ${(state.byoPowers || []).length ? `<p class="fine">Until then this seat can ${(state.byoPowers || []).map((p) => escapeHtml(p)).join(", ")} with your account.</p>` : ""}
       <button class="btn ghost" id="byo-cancel" ${state.byoBusy ? "disabled" : ""}>${state.byoBusy ? "Signing out…" : "Use the salon's account instead"}</button>
     </div>`;
   }
   if (state.byoStage === "url") {
+    const powers = (state.byoPowers || []).map((p) => escapeHtml(p)).join(", ");
     return `<div class="card">
       <h2>Sign in on this phone</h2>
       <p class="lede">Open the link, approve it in your own Claude account, then paste the code it gives you.</p>
+      ${powers ? `<p class="fine warn">Claude's sign-in asks for full access — this seat will be able to ${powers} until your session ends. It is revoked at checkout.</p>` : ""}
       <p><a class="byo-link" href="${escapeHtml(state.byoUrl)}" target="_blank" rel="noreferrer noopener">Open Claude sign-in ↗</a></p>
       <form id="byo-form" class="byo-form">
         <input id="byo-code" name="code" type="text" inputmode="text" autocomplete="one-time-code"
@@ -895,6 +901,7 @@ async function byoStart() {
       state.byoStage = "idle";
     } else {
       state.byoUrl = data.auth_url || "";
+      state.byoPowers = data.powers || [];
       state.byoStage = "url";
     }
   } catch (err) {
@@ -918,6 +925,7 @@ async function byoCode(code) {
     });
     state.byo = true;
     state.byoEmail = data.email || "";
+    state.byoPowers = data.powers || state.byoPowers;
     state.byoStage = "idle";
     state.byoUrl = "";
     state.messages = [];

@@ -74,6 +74,17 @@ markdown. `/export` is still the phone transcript.
 Without two credentialed dirs, a hard usage limit is an error on the phone —
 the visit is not moved to another chair.
 
+**Known broken: the 80% early switch.** Measured against Claude Code 2.1.241,
+`statusLine` is **never invoked** under `-p --output-format stream-json`, which is
+how the seat runs Claude. So `last-usage.json` is never written, `refresh_quota()`
+is always None, and the compact-then-switch-at-80% path never fires. This is not
+specific to a guest's own account — it affects salon accounts the same way, and it
+was masked because `scripts/fake-claude.py` writes that file itself, so every test
+of the feature passes against the fake. The **hard** limit path is unaffected:
+`parse_limit_error` reads the error off the stream, so a real usage limit still
+switches accounts (or reports `no_spare` on a BYO session). Needs its own fix —
+probably reading usage from the `result` event rather than a status-line hook.
+
 The desk needs its own `claude-host` login as well — see *Grading a shipped
 solution* below. It is never used for guest chat.
 
@@ -97,9 +108,16 @@ What this buys, and what it does not:
 * The guest's **password and 2FA never touch the seat**. They authenticate on
   their own phone, on claude.ai, where their own password manager already has an
   entry. The seat only ever sees the resulting token.
-* That token is scoped to **inference alone** — `user:inference`, no
-  `user:profile`, no `org:create_api_key`. Widen it with
-  `BYOI_GUEST_OAUTH_SCOPES` if quota reporting needs more.
+* **The token is not narrowed, and must never be described as though it were.**
+  `claude auth login` (2.1.241) requests a fixed scope set — `org:create_api_key
+  user:profile user:inference user:sessions:claude_code user:mcp_servers
+  user:file_upload` — and **ignores `CLAUDE_CODE_OAUTH_SCOPES`**; setting it to a
+  nonsense value produces an identical authorize URL. So the token on the seat
+  can do what Claude Code normally can with that account, *including creating an
+  API key on their org*. What protects the guest is that it is short-lived and
+  revoked at checkout, not that it is weak. The phone names these powers before
+  the guest approves, from the real `scope=` parameter rather than from what the
+  seat asked for.
 * It lives on **tmpfs**, so it never reaches the SSD. Check
   `swapon --show` is empty (or encrypted) or that guarantee is only partial —
   the seat says so in the start response when it is not.
@@ -119,8 +137,9 @@ onto the salon's billing. The host can still switch deliberately from the desk.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `BYOI_GUEST_OAUTH_SCOPES` | `user:inference` | Scopes asked for at guest sign-in |
+| `BYOI_GUEST_OAUTH_SCOPES` | `user:inference` | Passed to the CLI, which currently ignores it for `auth login` |
 | `BYOI_GUEST_RUNTIME_DIR` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` | Where the ephemeral account lives |
+| `BYOI_GUEST_LOGIN_TIMEOUT` | `600` | Seconds before an abandoned sign-in is killed |
 
 Without a tmpfs runtime dir the seat falls back to `data/guest-accounts/` and
 overwrites before unlinking — best effort only on a journaling filesystem, and

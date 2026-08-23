@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import os
@@ -88,13 +89,33 @@ async def _lifespan(application: FastAPI):
     logging.getLogger("uvicorn.error").info(
         "BYOI seat ready · guest PWA :8787 · control mTLS :8788"
     )
+    sweeper = asyncio.create_task(_sweep_guest_logins())
     try:
         yield
     finally:
+        sweeper.cancel()
         if control:
             server, task = control
             server.should_exit = True
             await task
+
+
+async def _sweep_guest_logins() -> None:
+    """Kill sign-ins a guest walked away from — otherwise the pty and its tmpfs
+    directory stay open until the seat is freed."""
+    from . import guest_auth
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            for sid in guest_auth.sweep():
+                logging.getLogger("uvicorn.error").info(
+                    "BYOI: abandoned guest sign-in for %s timed out", sid
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # a sweeper must never take the seat down
+            logging.getLogger("uvicorn.error").exception("BYOI: guest login sweep failed")
 
 
 _state = {

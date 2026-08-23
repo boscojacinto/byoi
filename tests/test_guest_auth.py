@@ -77,6 +77,7 @@ def test_login_env_drops_desk_credentials_and_carries_the_scope(guest_env, monke
     env = guest_auth.login_env(guest_auth.guest_dir("sess-1"))
     assert "BYOI_VERCEL_TOKEN" not in env
     assert "BYOI_NEON_API_KEY" not in env
+    # Passed through, but `claude auth login` ignores it — see test_scope_is_not_narrowed.
     assert env["CLAUDE_CODE_OAUTH_SCOPES"] == "user:inference"
     # A browser here would sign in on the seat's own screen, or complete a
     # localhost callback without the guest ever touching it.
@@ -86,6 +87,42 @@ def test_login_env_drops_desk_credentials_and_carries_the_scope(guest_env, monke
 def test_scope_is_overridable(guest_env, monkeypatch):
     monkeypatch.setenv("BYOI_GUEST_OAUTH_SCOPES", "user:inference user:profile")
     assert guest_auth.oauth_scopes() == "user:inference user:profile"
+
+
+def test_scopes_are_read_from_the_url_not_from_what_we_asked_for(guest_env):
+    """Verified against the real CLI: `auth login` ignores CLAUDE_CODE_OAUTH_SCOPES
+    and always requests the full set. Reporting the env value would tell the guest
+    their token is narrower than it is."""
+    real = (
+        "https://claude.com/cai/oauth/authorize?code=true&client_id=x&"
+        "scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+"
+        "user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&state=y"
+    )
+    scopes = guest_auth.requested_scopes(real)
+    assert "org:create_api_key" in scopes
+    assert scopes != [guest_auth.DEFAULT_SCOPES]
+
+
+def test_the_guest_is_told_what_the_token_can_do(guest_env):
+    powers = guest_auth.scope_powers(
+        ["org:create_api_key", "user:profile", "user:inference", "user:file_upload"]
+    )
+    assert "create an API key on your account" in powers
+    assert "read your profile" in powers
+    # user:inference is the expected one; it does not need calling out.
+    assert len(powers) == 3
+
+
+def test_granted_scopes_come_from_the_issued_token(guest_env):
+    config = guest_auth.ensure_guest_dir("sess-1")
+    (config / ".credentials.json").write_text(
+        json.dumps(
+            {"claudeAiOauth": {"accessToken": "t", "scopes": ["user:inference", "user:profile"]}}
+        ),
+        encoding="utf-8",
+    )
+    assert guest_auth.granted_scopes(config) == ["user:inference", "user:profile"]
+    assert guest_auth.granted_scopes(guest_auth.guest_dir("missing")) == []
 
 
 # --- hooks (grading depends on these) ----------------------------------------
@@ -154,7 +191,7 @@ def test_login_relays_a_url_and_the_code_completes_it(guest_env):
     started = run(guest_auth.begin_login("sess-1"))
     assert started["auth_url"].startswith("https://")
     assert "oauth" in started["auth_url"]
-    assert started["scopes"] == "user:inference"
+    assert started["scopes"] == ["user:inference"]
 
     done = run(guest_auth.submit_code("sess-1", GOOD_CODE))
     assert done["ok"] is True
@@ -180,10 +217,19 @@ def test_a_code_with_no_login_waiting_is_a_lookup_error(guest_env):
         run(guest_auth.submit_code("sess-1", GOOD_CODE))
 
 
+def test_the_login_window_is_configurable(guest_env, monkeypatch):
+    """Five minutes was measured too tight for sign-in plus 2FA on a phone."""
+    assert guest_auth.login_timeout() == 600.0
+    monkeypatch.setenv("BYOI_GUEST_LOGIN_TIMEOUT", "900")
+    assert guest_auth.login_timeout() == 900.0
+    monkeypatch.setenv("BYOI_GUEST_LOGIN_TIMEOUT", "not-a-number")
+    assert guest_auth.login_timeout() == guest_auth.LOGIN_TIMEOUT
+
+
 def test_an_abandoned_login_is_swept(guest_env):
     run(guest_auth.begin_login("sess-1"))
     assert guest_auth.pending("sess-1")
-    dropped = guest_auth.sweep(now=time.time() + guest_auth.LOGIN_TIMEOUT + 1)
+    dropped = guest_auth.sweep(now=time.time() + guest_auth.login_timeout() + 1)
     assert dropped == ["sess-1"]
     assert not guest_auth.pending("sess-1")
 

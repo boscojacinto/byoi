@@ -5,16 +5,25 @@ instead of the salon's. The seat never holds a durable credential of theirs:
 
 * the OAuth flow is **relayed to the guest's phone**, so their password and 2FA
   are typed into claude.ai on their own device, never on this machine;
-* the token it mints is scoped to inference alone (``BYOI_GUEST_OAUTH_SCOPES``),
-  so it cannot read their profile or create an API key against their org;
 * it lives on **tmpfs**, so it never reaches stable storage;
 * freeing the seat **revokes it server-side** before unlinking the directory —
   deleting ``.credentials.json`` alone would leave a live refresh token valid
   until ``refreshTokenExpiresAt``.
 
-What this does not buy is privacy from the operator *while the session runs*.
-Claude Code executes on this machine, so root here can read the live token. The
-guest is told so in as many words before they sign in.
+Two things this does **not** buy, both of which the guest is told before they
+sign in:
+
+**The token is not narrowed.** ``claude auth login`` requests a fixed scope set —
+``org:create_api_key user:profile user:inference user:sessions:claude_code
+user:mcp_servers user:file_upload`` — and ignores ``CLAUDE_CODE_OAUTH_SCOPES``
+entirely; a nonsense value produces the same URL. So the token on this seat can
+do what Claude Code can normally do with their account, **including creating an
+API key on their org**. What protects the guest is that it is short-lived and
+revoked at checkout, not that it is weak. Never claim otherwise in guest-facing
+copy: report ``granted_scopes()``, which reads what was actually issued.
+
+**It is not private from the operator while the session runs.** Claude Code
+executes on this machine, so root here can read the live token.
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from apps.secrets import scrub
 
@@ -41,11 +51,22 @@ from .accounts import Account, handoffs_dir
 ROOT = Path(__file__).resolve().parents[2]
 
 GUEST_LABEL = "guest"
-# Inference and nothing else. See docs/salon.md — widen only if the seat's quota
-# reporting turns out to need user:profile.
+# Passed through as CLAUDE_CODE_OAUTH_SCOPES, which `claude auth login` (2.1.241)
+# ignores — verified: setting it to a nonsense value produces an identical
+# authorize URL. Kept because other code paths honour it and a future CLI may,
+# but nothing may promise the guest a narrowed token on the strength of it.
 DEFAULT_SCOPES = "user:inference"
-# An abandoned QR must not leave a pty holding a tmpfs directory open.
-LOGIN_TIMEOUT = 300.0
+# Scopes worth naming to a guest before they approve the sign-in.
+NOTABLE_SCOPES = {
+    "org:create_api_key": "create an API key on your account",
+    "user:profile": "read your profile",
+    "user:file_upload": "upload files",
+    "user:mcp_servers": "reach your MCP servers",
+}
+# An abandoned sign-in must not leave a pty holding a tmpfs directory open. Ten
+# minutes, not five: a guest has to open the link, sign in, clear 2FA and copy a
+# code back, on a phone, in a cafe. Five was measured to be too tight.
+LOGIN_TIMEOUT = 600.0
 URL_WAIT = 45.0
 CODE_WAIT = 90.0
 LOGOUT_TIMEOUT = 30.0
@@ -57,6 +78,13 @@ _URL = re.compile(r"https://[^\s\"'<>\x00-\x1f]+")
 def claude_bin() -> str:
     binary = os.environ.get("BYOI_CLAUDE", "claude")
     return shutil.which(binary) or binary
+
+
+def login_timeout() -> float:
+    try:
+        return float(os.environ.get("BYOI_GUEST_LOGIN_TIMEOUT", "").strip() or LOGIN_TIMEOUT)
+    except ValueError:
+        return LOGIN_TIMEOUT
 
 
 def oauth_scopes() -> str:
@@ -158,6 +186,34 @@ def storage_warnings() -> list[str]:
             "holds only if that swap is encrypted"
         )
     return notes
+
+
+def requested_scopes(auth_url: str | None) -> list[str]:
+    """What the sign-in URL actually asks for — not what we asked it to ask for."""
+    if not auth_url:
+        return []
+    query = urlparse(auth_url).query
+    return parse_qs(query).get("scope", [""])[0].split()
+
+
+def granted_scopes(config_dir: Path | None) -> list[str]:
+    """What the issued token actually carries, straight from .credentials.json."""
+    if config_dir is None:
+        return []
+    try:
+        data = json.loads((Path(config_dir) / ".credentials.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    scopes = oauth.get("scopes") if isinstance(oauth, dict) else None
+    if isinstance(scopes, str):
+        return scopes.split()
+    return [str(s) for s in scopes] if isinstance(scopes, list) else []
+
+
+def scope_powers(scopes: list[str]) -> list[str]:
+    """Plain-language list of what this token lets the seat do with the account."""
+    return [NOTABLE_SCOPES[s] for s in scopes if s in NOTABLE_SCOPES]
 
 
 def credentials_ready(config_dir: Path | None) -> bool:
@@ -287,7 +343,13 @@ async def begin_login(session_id: str | None) -> dict[str, Any]:
         url = _find_url(login.buffer)
         if url:
             login.auth_url = url
-            return {"auth_url": url, "scopes": oauth_scopes(), "session_id": sid}
+            scopes = requested_scopes(url)
+            return {
+                "auth_url": url,
+                "scopes": scopes,
+                "powers": scope_powers(scopes),
+                "session_id": sid,
+            }
         if credentials_ready(config_dir):
             _close(login)
             _LOGINS.pop(sid, None)
@@ -328,11 +390,13 @@ async def submit_code(session_id: str | None, code: str) -> dict[str, Any]:
         if credentials_ready(login.config_dir):
             _close(login)
             _LOGINS.pop(sid, None)
+            scopes = granted_scopes(login.config_dir)
             return {
                 "ok": True,
                 "session_id": sid,
                 "email": await account_email(login.config_dir),
-                "scopes": oauth_scopes(),
+                "scopes": scopes,
+                "powers": scope_powers(scopes),
             }
         if not alive:
             break
@@ -481,7 +545,7 @@ def pending(session_id: str | None) -> bool:
 
 def sweep(now: float | None = None) -> list[str]:
     """Kill sign-ins the guest walked away from. Returns the sessions dropped."""
-    cutoff = (now if now is not None else time.time()) - LOGIN_TIMEOUT
+    cutoff = (now if now is not None else time.time()) - login_timeout()
     stale = [sid for sid, login in _LOGINS.items() if login.started_at < cutoff]
     for sid in stale:
         login = _LOGINS.pop(sid, None)

@@ -110,6 +110,7 @@ h1 { font-size: 1.85rem; font-weight: 600; margin: 0; letter-spacing: -0.02em; }
   line-height: 1.45;
   margin: 0.45rem 0;
 }
+.fine.warn { color: var(--danger); }
 .byo-link {
   display: inline-block;
   color: var(--espresso);
