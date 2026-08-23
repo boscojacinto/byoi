@@ -77,6 +77,55 @@ the visit is not moved to another chair.
 The desk needs its own `claude-host` login as well — see *Grading a shipped
 solution* below. It is never used for guest chat.
 
+## A guest's own Claude account
+
+A guest who already pays for Claude can run the session on their account rather
+than the salon's — **Your Claude account** on the floor screen. Nothing is set up
+in advance and the host does nothing.
+
+```
+phone: "Use my own Claude account"
+  seat mints /run/user/<uid>/byoi/guest-<session>/   tmpfs, 0700
+  seat runs `claude auth login` there, in a pty
+  phone shows the OAuth link -> guest signs in on THEIR phone, at claude.ai
+  guest pastes the code back -> .credentials.json lands on tmpfs
+free the seat -> `claude auth logout`, then unlink
+```
+
+What this buys, and what it does not:
+
+* The guest's **password and 2FA never touch the seat**. They authenticate on
+  their own phone, on claude.ai, where their own password manager already has an
+  entry. The seat only ever sees the resulting token.
+* That token is scoped to **inference alone** — `user:inference`, no
+  `user:profile`, no `org:create_api_key`. Widen it with
+  `BYOI_GUEST_OAUTH_SCOPES` if quota reporting needs more.
+* It lives on **tmpfs**, so it never reaches the SSD. Check
+  `swapon --show` is empty (or encrypted) or that guarantee is only partial —
+  the seat says so in the start response when it is not.
+* Teardown **revokes** before it unlinks. Deleting `.credentials.json` alone
+  would leave a live refresh token valid until `refreshTokenExpiresAt`.
+* It is **not** private from the operator during the visit. Claude Code runs on
+  the seat, so root there can read the live token. The phone says this in as many
+  words before the guest signs in.
+
+Freeing the seat also removes `data/handoffs/<session>.md`. The guest's project
+tree, its git history, and any `refs/byoi/` submission are left alone — those are
+their work, not their credentials.
+
+A BYO session **never fails over to a salon account**: hitting the guest's own
+usage limit reports that limit and stops, rather than quietly moving their work
+onto the salon's billing. The host can still switch deliberately from the desk.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `BYOI_GUEST_OAUTH_SCOPES` | `user:inference` | Scopes asked for at guest sign-in |
+| `BYOI_GUEST_RUNTIME_DIR` | `$XDG_RUNTIME_DIR` or `/run/user/<uid>` | Where the ephemeral account lives |
+
+Without a tmpfs runtime dir the seat falls back to `data/guest-accounts/` and
+overwrites before unlinking — best effort only on a journaling filesystem, and
+reported rather than hidden.
+
 The seat talks to Claude Code over **stream-json** (the same machine protocol
 the Agent SDK uses). Guests never see a TTY. The working directory is this
 repo (override with `BYOI_WORKSPACE`). Extra trees: `BYOI_ADD_DIR=/path:/other`.

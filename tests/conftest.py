@@ -12,12 +12,14 @@ def _reset_seat_gate():
     chat_session.workspace_path = None
     chat_session.account_label = None
     chat_session.config_dir = None
+    chat_session.byo = False
     yield
     gate.reset()
     chat_session.reset()
     chat_session.workspace_path = None
     chat_session.account_label = None
     chat_session.config_dir = None
+    chat_session.byo = False
 
 
 @pytest.fixture(autouse=True)
