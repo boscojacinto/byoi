@@ -158,3 +158,39 @@ def test_from_template_rejects_an_unknown_name(tmp_path, monkeypatch):
     monkeypatch.setenv("BYOI_PROJECTS_DIR", str(tmp_path))
     with pytest.raises(ValueError, match="unknown template"):
         from_template(template="nope")
+
+
+def test_from_template_pins_the_branch_to_main(tmp_path, monkeypatch):
+    """A bare `git init` follows the operator's local default, often still master."""
+    import subprocess
+
+    from apps.api.projects import from_template
+
+    monkeypatch.setenv("BYOI_PROJECTS_DIR", str(tmp_path))
+    made = from_template(template="next-fullstack", name="branchcheck")
+    head = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=made["local_path"], capture_output=True, text=True,
+    )
+    assert head.stdout.strip() == "main"
+
+
+def test_from_template_commits_the_starter(tmp_path, monkeypatch):
+    import subprocess
+
+    from apps.api.projects import from_template
+
+    monkeypatch.setenv("BYOI_PROJECTS_DIR", str(tmp_path))
+    made = from_template(template="next-fullstack", name="committed")
+    listed = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        cwd=made["local_path"], capture_output=True, text=True,
+    ).stdout.split()
+    assert "byoi.json" in listed
+    assert "app/api/health/route.ts" in listed
+    assert made["framework"] == "nextjs"
+    # Nothing left dirty for the guest to trip over.
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=made["local_path"], capture_output=True, text=True
+    )
+    assert status.stdout.strip() == ""

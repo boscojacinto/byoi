@@ -13,6 +13,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = ROOT / "apps" / "templates"
 MANIFEST = "byoi.json"
+DEFAULT_BRANCH = "main"
 
 # What a detected project needs from the salon, keyed by evidence in the tree.
 NEEDS_HINTS = {
@@ -138,7 +139,9 @@ def from_template(
         raise ValueError(f"folder already exists: {dest}")
     shutil.copytree(src, dest)
     try:
-        _run(["git", "init", "-q", "."], cwd=dest)
+        # Pin the branch: a bare `git init` follows the operator's local default,
+        # which is still `master` on most boxes and surprises everyone downstream.
+        _run(["git", "init", "-q", "-b", DEFAULT_BRANCH, "."], cwd=dest)
         _run(["git", "add", "-A"], cwd=dest)
         _run(["git", "commit", "-qm", f"Start from the {template} template."], cwd=dest)
     except FileNotFoundError as exc:
