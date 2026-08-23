@@ -231,12 +231,28 @@ failure at any step is recorded but never blocks freeing the seat.
 
 ### Credentials (desk only)
 
-| Env | Effect if unset |
-|---|---|
-| `BYOI_VERCEL_TOKEN` | Deploy is refused with a clear message |
-| `BYOI_VERCEL_SCOPE` | Personal account is used |
-| `BYOI_NEON_API_KEY` | Deploy ships without a managed Postgres, and says so |
-| `BYOI_UPSTASH_EMAIL` / `BYOI_UPSTASH_API_KEY` | Ships without a managed Redis, and says so |
+Same contract as `host.token`: an environment variable wins, otherwise a file
+under `data/secrets/`. Prefer the file — the desk is a long-running process, so
+exporting a variable in another shell cannot reach it, and a token on a command
+line lands in shell history and in `ps`.
+
+```bash
+./scripts/salon-secrets.sh vercel     # prompts, writes data/secrets/vercel.token 0600
+./scripts/salon-secrets.sh neon
+./scripts/salon-secrets.sh upstash
+./scripts/salon-secrets.sh --list     # what is configured; never the values
+```
+
+| Credential | File | Effect if unset |
+|---|---|---|
+| `BYOI_VERCEL_TOKEN` | `vercel.token` | Deploy is refused with a clear message |
+| `BYOI_VERCEL_SCOPE` | `vercel.scope` | Personal account is used |
+| `BYOI_NEON_API_KEY` | `neon.token` | Ships without a managed Postgres, and says so |
+| `BYOI_UPSTASH_EMAIL` | `upstash.email` | Ships without a managed Redis, and says so |
+| `BYOI_UPSTASH_API_KEY` | `upstash.token` | ” |
+
+`data/` is gitignored, so these never reach a commit. Point elsewhere with
+`BYOI_SECRETS_DIR`, or at a single file with e.g. `BYOI_VERCEL_TOKEN_FILE`.
 
 Auth needs no vendor: a fresh `AUTH_SECRET` is minted per deploy. Missing
 credentials degrade the deploy, they never fail it — which is the right

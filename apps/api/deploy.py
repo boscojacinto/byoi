@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from apps.secrets import read_secret
+
 from . import projects as project_ops
 from . import provision as provisioning
 
@@ -44,10 +46,11 @@ def runs_dir() -> Path:
 
 
 def _token() -> str:
-    token = os.environ.get("BYOI_VERCEL_TOKEN", "").strip()
+    token = read_secret("BYOI_VERCEL_TOKEN")
     if not token:
         raise DeployError(
-            "no Vercel token on the desk — set BYOI_VERCEL_TOKEN (never on the seat)"
+            "no Vercel token on the desk — set BYOI_VERCEL_TOKEN or run "
+            "./scripts/salon-secrets.sh vercel (never on the seat)"
         )
     return token
 
@@ -64,7 +67,7 @@ def _clean_env() -> dict[str, str]:
 
 def deploy_argv(dest: Path, env: dict[str, str], *, token: str, production: bool = False) -> list[str]:
     argv = [vercel_bin(), "deploy", "--yes", "--token", token, "--cwd", str(dest)]
-    scope = os.environ.get("BYOI_VERCEL_SCOPE", "").strip()
+    scope = read_secret("BYOI_VERCEL_SCOPE")
     if scope:
         argv += ["--scope", scope]
     argv.append("--prod" if production else "--target=preview")

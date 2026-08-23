@@ -18,6 +18,8 @@ from typing import Any
 
 import httpx
 
+from apps.secrets import read_secret
+
 NEON_API = "https://console.neon.tech/api/v2"
 UPSTASH_API = "https://api.upstash.com/v2"
 TIMEOUT = 60.0
@@ -28,7 +30,8 @@ class ProvisionError(RuntimeError):
 
 
 def _token(name: str) -> str | None:
-    return os.environ.get(name, "").strip() or None
+    """Env var or data/secrets file — see apps/secrets.py."""
+    return read_secret(name)
 
 
 def resource_name(session_id: str) -> str:
