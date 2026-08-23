@@ -12,6 +12,8 @@ import termios
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from apps.secrets import scrub
+
 from .tmux_claude import attach_argv, ensure_session
 
 
@@ -29,7 +31,8 @@ async def attach_tmux(ws: WebSocket) -> None:
 
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvp(attach_argv()[0], attach_argv())
+        argv = attach_argv()
+        os.execvpe(argv[0], argv, scrub(os.environ.copy()))
         os._exit(1)
 
     os.set_blocking(fd, False)

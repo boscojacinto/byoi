@@ -8,10 +8,9 @@ from apps import secrets
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
+    # conftest already blanks the real credentials; point at this test's dir.
     monkeypatch.setenv("BYOI_SECRETS_DIR", str(tmp_path))
-    for name in secrets.SECRETS:
-        monkeypatch.delenv(name, raising=False)
-        monkeypatch.delenv(f"{name}_FILE", raising=False)
+    monkeypatch.setenv("BYOI_ENV_FILE", str(tmp_path / "absent.env"))
     return tmp_path
 
 
@@ -94,3 +93,108 @@ def test_provisioning_reads_credentials_from_files(tmp_path):
     (tmp_path / "upstash.token").write_text("up-key")
     assert provision._token("BYOI_UPSTASH_EMAIL") == "me@example.com"
     assert provision._token("BYOI_UPSTASH_API_KEY") == "up-key"
+
+
+# ------------------------------------------------------------------ .env support
+
+
+def test_dotenv_is_read(tmp_path, monkeypatch):
+    envf = tmp_path / "dot.env"
+    envf.write_text("BYOI_VERCEL_TOKEN=from-dotenv\n")
+    monkeypatch.setenv("BYOI_ENV_FILE", str(envf))
+    assert secrets.read_secret("BYOI_VERCEL_TOKEN") == "from-dotenv"
+    assert secrets.source_of("BYOI_VERCEL_TOKEN") == "dotenv"
+
+
+def test_dotenv_parsing_handles_comments_quotes_and_export(tmp_path, monkeypatch):
+    envf = tmp_path / "dot.env"
+    envf.write_text(
+        "# a comment\n"
+        "\n"
+        "export BYOI_VERCEL_TOKEN='quoted-value'\n"
+        'BYOI_NEON_API_KEY="double"\n'
+        "not-a-pair\n"
+        "BYOI_UPSTASH_EMAIL = spaced@example.com \n"
+    )
+    monkeypatch.setenv("BYOI_ENV_FILE", str(envf))
+    values = secrets.dotenv_values()
+    assert values["BYOI_VERCEL_TOKEN"] == "quoted-value"
+    assert values["BYOI_NEON_API_KEY"] == "double"
+    assert values["BYOI_UPSTASH_EMAIL"] == "spaced@example.com"
+
+
+def test_dotenv_missing_file_is_not_an_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("BYOI_ENV_FILE", str(tmp_path / "nope.env"))
+    assert secrets.dotenv_values() == {}
+
+
+def test_managed_secret_beats_a_stale_dotenv(tmp_path, monkeypatch):
+    """Rotating with salon-secrets.sh must not be silently undone by an old .env."""
+    envf = tmp_path / "dot.env"
+    envf.write_text("BYOI_VERCEL_TOKEN=stale\n")
+    monkeypatch.setenv("BYOI_ENV_FILE", str(envf))
+    (tmp_path / "vercel.token").write_text("rotated")
+    assert secrets.read_secret("BYOI_VERCEL_TOKEN") == "rotated"
+
+
+def test_env_beats_everything(tmp_path, monkeypatch):
+    envf = tmp_path / "dot.env"
+    envf.write_text("BYOI_VERCEL_TOKEN=stale\n")
+    monkeypatch.setenv("BYOI_ENV_FILE", str(envf))
+    (tmp_path / "vercel.token").write_text("managed")
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "explicit")
+    assert secrets.read_secret("BYOI_VERCEL_TOKEN") == "explicit"
+
+
+# ------------------------------------------------- keeping secrets off the seat
+
+
+def test_scrub_removes_every_desk_only_credential():
+    env = {name: "secret" for name in secrets.SECRETS}
+    env["PATH"] = "/usr/bin"
+    env["CLAUDE_CONFIG_DIR"] = "/x"
+    cleaned = secrets.scrub(dict(env))
+    assert not any(name in cleaned for name in secrets.SECRETS)
+    assert cleaned["PATH"] == "/usr/bin"
+    assert cleaned["CLAUDE_CONFIG_DIR"] == "/x"
+
+
+def test_scrub_is_safe_when_nothing_is_set():
+    assert secrets.scrub({"PATH": "/usr/bin"}) == {"PATH": "/usr/bin"}
+
+
+def test_the_guests_claude_never_inherits_a_deploy_token(tmp_path, monkeypatch):
+    """The guest has Bash and inherits the seat env — the token must not be in it."""
+    import asyncio
+
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok-must-not-leak")
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path))
+    from apps.seat.claude_chat import ClaudeChat
+
+    seen: dict[str, str] = {}
+
+    async def spawn(env=None):
+        seen.update(env or {})
+
+        class Proc:
+            returncode = None
+            stdin = None
+            stdout = asyncio.StreamReader()
+            stderr = asyncio.StreamReader()
+
+            def kill(self):
+                self.returncode = -9
+                self.stdout.feed_eof()
+                self.stderr.feed_eof()
+
+        return Proc()
+
+    async def run():
+        chat = ClaudeChat(spawn=spawn)
+        await chat.ensure()
+        chat._stop_process()
+
+    asyncio.run(run())
+    assert seen, "spawn was never called"
+    assert "BYOI_VERCEL_TOKEN" not in seen
+    assert "PATH" in seen  # the rest of the environment is intact

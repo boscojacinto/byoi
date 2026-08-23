@@ -12,6 +12,8 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from apps.secrets import scrub
+
 from .accounts import (
     COMPACT_CMD,
     PRIMER,
@@ -593,7 +595,9 @@ class ClaudeChat:
         self._stop_process()
         self.translator = GuestTranslator()
         cwd = workspace()
-        env = os.environ.copy()
+        # The guest's Claude has Bash and inherits this environment, so desk-only
+        # deploy credentials must never be in it — however they got here.
+        env = scrub(os.environ.copy())
         if self.config_dir is not None:
             env["CLAUDE_CONFIG_DIR"] = str(self.config_dir)
         try:

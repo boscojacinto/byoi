@@ -3,6 +3,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH="${PYTHONPATH:-}:src:."
 export BYOI_DATA="${BYOI_DATA:-$PWD/data}"
+# Desk only. run-seat.sh deliberately does not do this: the guest's Claude
+# inherits the seat environment, so deploy credentials must stay off it.
+if [[ -f "${BYOI_ENV_FILE:-$PWD/.env}" ]]; then
+  set -a; . "${BYOI_ENV_FILE:-$PWD/.env}"; set +a
+fi
 TLS_DIR="${BYOI_TLS_DIR:-$PWD/data/tls}"
 if [[ -f "$TLS_DIR/host.token" ]]; then
   export BYOI_TLS_DIR="${BYOI_TLS_DIR:-$TLS_DIR}"

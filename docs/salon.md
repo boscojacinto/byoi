@@ -231,10 +231,22 @@ failure at any step is recorded but never blocks freeing the seat.
 
 ### Credentials (desk only)
 
-Same contract as `host.token`: an environment variable wins, otherwise a file
-under `data/secrets/`. Prefer the file — the desk is a long-running process, so
-exporting a variable in another shell cannot reach it, and a token on a command
-line lands in shell history and in `ps`.
+Looked up in this order, first hit wins:
+
+1. the environment
+2. `data/secrets/<name>` — what `salon-secrets.sh` writes
+3. `.env` at the repo root
+
+`data/secrets/` deliberately beats `.env`, so rotating a credential there is
+never silently undone by a stale copy someone left in `.env`. Prefer either file
+over an exported variable: the desk is a long-running process, so exporting in
+another shell cannot reach it, and a token on a command line lands in shell
+history and in `ps`.
+
+**These are desk credentials and the seat must never see them.** The guest's
+Claude has Bash and inherits the seat's environment, so `run-seat.sh` does not
+load `.env`, and every seat path that spawns a process — the chat, the tmux
+session, the PTY side door — scrubs them first.
 
 ```bash
 ./scripts/salon-secrets.sh vercel     # prompts, writes data/secrets/vercel.token 0600
@@ -251,8 +263,12 @@ line lands in shell history and in `ps`.
 | `BYOI_UPSTASH_EMAIL` | `upstash.email` | Ships without a managed Redis, and says so |
 | `BYOI_UPSTASH_API_KEY` | `upstash.token` | ” |
 
-`data/` is gitignored, so these never reach a commit. Point elsewhere with
-`BYOI_SECRETS_DIR`, or at a single file with e.g. `BYOI_VERCEL_TOKEN_FILE`.
+`data/` and `.env` are both gitignored, so these never reach a commit. Point
+elsewhere with `BYOI_SECRETS_DIR`, `BYOI_ENV_FILE`, or a single file with e.g.
+`BYOI_VERCEL_TOKEN_FILE`.
+
+The test suite blanks all of these, so no test can reach a live provider API
+with a real token or print one into a failure message.
 
 Auth needs no vendor: a fresh `AUTH_SECRET` is minted per deploy. Missing
 credentials degrade the deploy, they never fail it — which is the right

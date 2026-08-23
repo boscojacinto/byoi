@@ -45,6 +45,23 @@ def _seat_sync_ok(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_deploy_credentials(tmp_path_factory, monkeypatch):
+    """No test may see the operator's real credentials.
+
+    Without this a test can reach a live provider API with a real token, and a
+    failing assertion can print the secret into the test log.
+    """
+    from apps.secrets import SECRETS
+
+    empty = tmp_path_factory.mktemp("secrets")
+    monkeypatch.setenv("BYOI_SECRETS_DIR", str(empty))
+    monkeypatch.setenv("BYOI_ENV_FILE", str(empty / "absent.env"))
+    for name in SECRETS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(f"{name}_FILE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_host_token(monkeypatch):
     """Don't pick up data/tls/host.token from a live salon box."""
     monkeypatch.setenv("BYOI_HOST_TOKEN", "byoi-host")

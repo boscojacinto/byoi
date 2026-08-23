@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 
+from apps.secrets import scrub
+
 SESSION = os.environ.get("BYOI_TMUX", "claude-guest")
 CLAUDE_BIN = os.environ.get("BYOI_CLAUDE", "claude")
 
@@ -28,7 +30,11 @@ def ensure_session() -> dict:
     if has_session():
         return {"tmux": SESSION, "created": False, "cmd": None}
     inner = shutil.which(CLAUDE_BIN) or shutil.which("bash") or "/bin/sh"
-    subprocess.check_call(["tmux", "new-session", "-d", "-s", SESSION, inner])
+    # The session holds a shell an operator can type into; keep desk-only
+    # deploy credentials out of it.
+    subprocess.check_call(
+        ["tmux", "new-session", "-d", "-s", SESSION, inner], env=scrub(os.environ.copy())
+    )
     return {"tmux": SESSION, "created": True, "cmd": inner}
 
 
