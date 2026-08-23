@@ -66,24 +66,43 @@ CLAUDE_CONFIG_DIR=data/claude-accounts/claude-seat-2 claude setup-token
 ```
 
 Each dir is a separate Anthropic login (`CLAUDE_CONFIG_DIR`, Linux). The guest
-stays on this seat’s URL. When the live login’s 5-hour or 7-day usage hits 80%,
-the seat runs `/compact`, saves that summary, and continues on the next spare
-account. Guest `/handoff` (and the desk **Handoff** button) downloads the
+stays on this seat’s URL. When Claude reports the live login is close to its
+5-hour or 7-day limit, the seat runs `/compact`, saves that summary, and
+continues on the next spare account. Guest `/handoff` (and the desk **Handoff** button) downloads the
 markdown. `/export` is still the phone transcript.
 
 Without two credentialed dirs, a hard usage limit is an error on the phone —
 the visit is not moved to another chair.
 
-**Known broken: the 80% early switch.** Measured against Claude Code 2.1.241,
-`statusLine` is **never invoked** under `-p --output-format stream-json`, which is
-how the seat runs Claude. So `last-usage.json` is never written, `refresh_quota()`
-is always None, and the compact-then-switch-at-80% path never fires. This is not
-specific to a guest's own account — it affects salon accounts the same way, and it
-was masked because `scripts/fake-claude.py` writes that file itself, so every test
-of the feature passes against the fake. The **hard** limit path is unaffected:
-`parse_limit_error` reads the error off the stream, so a real usage limit still
-switches accounts (or reports `no_spare` on a BYO session). Needs its own fix —
-probably reading usage from the `result` event rather than a status-line hook.
+### Where the usage signal comes from
+
+Not from `statusLine`. Measured against Claude Code 2.1.241, the status line is
+**never invoked** under `-p --output-format stream-json`, which is how the seat
+runs Claude — so `last-usage.json` is never written and the early switch could
+not fire at all. That was true for salon accounts as much as guest ones, and it
+was masked because `scripts/fake-claude.py` writes that file itself, so the
+feature's tests all passed against the fake.
+
+The seat now reads the **`rate_limit_event`** frame off the stream instead:
+
+```json
+{"status": "allowed", "resetsAt": 1787507400, "rateLimitType": "five_hour",
+ "overageStatus": "rejected", "isUsingOverage": false}
+```
+
+It carries a *status*, not a percentage — `allowed`, `allowed_warning`, or
+`rejected` — so the trigger is categorical. `allowed_warning` starts the
+compact-then-switch handoff, which is what 80% used to mean. `rateLimitType` also
+appears as `seven_day_opus` / `seven_day_sonnet` / `seven_day_overage_included`;
+those fold into `seven_day`.
+
+`last-usage.json` is still read when present, so the tmux side door and the test
+fake keep working, and `BYOI_QUOTA_FAILOVER_PCT` still applies to that path. A
+live stream status always wins over the file.
+
+Hard limits never depended on any of this: `parse_limit_error` reads the error off
+the stream, so a real usage limit switches accounts (or reports `no_spare` on a
+guest's own account) regardless.
 
 The desk needs its own `claude-host` login as well — see *Grading a shipped
 solution* below. It is never used for guest chat.

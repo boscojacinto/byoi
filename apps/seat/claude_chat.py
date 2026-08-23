@@ -23,6 +23,7 @@ from .accounts import (
     clear_submit,
     collect_summary,
     parse_limit_error,
+    parse_rate_limit_event,
     preferred_label,
     quota_over_threshold,
     read_submit,
@@ -271,6 +272,9 @@ class GuestTranslator:
             return self._result(obj)
         if kind == "control_request":
             return self._control(obj)
+        if kind == "rate_limit_event":
+            quota = parse_rate_limit_event(obj.get("rate_limit_info"))
+            return [{"type": "quota", **quota}] if quota else []
         if kind in {"prompt_suggestion", "prompt-suggestion"}:
             text = obj.get("suggestion") or obj.get("text") or obj.get("prompt") or ""
             if not text:
@@ -766,6 +770,15 @@ class ClaudeChat:
         await self._write(encode_permission(request_id, allow, payload))
 
     def refresh_quota(self) -> dict[str, Any] | None:
+        """Usage as last reported. The stream wins; the file is a fallback.
+
+        `statusLine` is never invoked under `-p --output-format stream-json`, so
+        on a real CLI `last-usage.json` never appears and `rate_limit_event` is
+        the only signal. The file path is kept for the tmux side door and for
+        tests that drive a fake CLI which writes it.
+        """
+        if self.quota and self.quota.get("status"):
+            return self.quota
         if self.config_dir is None:
             return self.quota
         payload = read_usage_file(self.config_dir / "last-usage.json")
@@ -941,6 +954,9 @@ class ClaudeChat:
                         self._busy = bool(event.get("busy"))
                     if kind == "usage":
                         self.last_usage = event
+                    if kind == "quota":
+                        # The stream is the authoritative source; see refresh_quota.
+                        self.quota = {k: v for k, v in event.items() if k != "type"}
                     if kind == "error":
                         self.last_error = str(event.get("message") or self.last_error or "")
                     if kind == "suggestion":

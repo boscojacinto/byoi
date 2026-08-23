@@ -237,6 +237,51 @@ def parse_usage_payload(data: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+# `status` values the CLI emits on rate_limit_event. There is no percentage on
+# this event — the signal is categorical, so the 80% threshold below only applies
+# to the status-line file, and the stream path trips on the warning instead.
+RATE_LIMIT_WARNING = "allowed_warning"
+RATE_LIMIT_REJECTED = "rejected"
+_WINDOW_LABELS = {
+    "five_hour": "five_hour",
+    "seven_day": "seven_day",
+    "seven_day_opus": "seven_day",
+    "seven_day_sonnet": "seven_day",
+    "seven_day_overage_included": "seven_day",
+}
+
+
+def parse_rate_limit_event(info: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalise `rate_limit_event.rate_limit_info` into the quota shape.
+
+    This is the only usage signal the seat actually receives: `statusLine` is
+    never invoked under `-p --output-format stream-json`, so `last-usage.json`
+    is never written by a real CLI. Percentages stay None — the event carries a
+    status, not a number.
+    """
+    if not isinstance(info, dict):
+        return None
+    status = str(info.get("status") or "").strip() or None
+    raw_window = str(info.get("rateLimitType") or "").strip()
+    window = _WINDOW_LABELS.get(raw_window, raw_window or None)
+    resets_at = info.get("resetsAt")
+    out: dict[str, Any] = {
+        "five_hour": None,
+        "five_hour_resets": None,
+        "seven_day": None,
+        "seven_day_resets": None,
+        "status": status,
+        "window": window,
+        "resets_at": resets_at,
+        "using_overage": bool(info.get("isUsingOverage")),
+    }
+    if window in {"five_hour", "seven_day"}:
+        out[f"{window}_resets"] = resets_at
+    if status is None and window is None:
+        return None
+    return out
+
+
 def read_usage_file(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
@@ -252,6 +297,12 @@ def quota_over_threshold(
 ) -> str | None:
     if not quota:
         return None
+    # The stream's rate_limit_event has no percentage, so a warning status is the
+    # threshold. Checked first: when it is present it is the only real signal.
+    status = quota.get("status")
+    if status in {RATE_LIMIT_WARNING, RATE_LIMIT_REJECTED}:
+        window = quota.get("window")
+        return window if window in {"five_hour", "seven_day"} else "five_hour"
     cut = quota_threshold() if threshold is None else threshold
     five = quota.get("five_hour")
     if five is not None and float(five) >= cut:

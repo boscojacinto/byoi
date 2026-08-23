@@ -407,12 +407,20 @@ function applyChatEvent(msg) {
   }
 }
 
+const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d" };
+
 function quotaBits() {
   const q = state.quota;
   if (!q) return [];
   const bits = [];
   if (q.five_hour != null) bits.push(`5h ${Math.round(Number(q.five_hour))}%`);
   if (q.seven_day != null) bits.push(`7d ${Math.round(Number(q.seven_day))}%`);
+  // The stream's rate_limit_event carries a status, not a percentage. Show the
+  // status when there is no number rather than showing nothing at all.
+  if (!bits.length && q.status && q.status !== "allowed") {
+    const win = WINDOW_LABEL[q.window] || "usage";
+    bits.push(q.status === "rejected" ? `${win} limit reached` : `${win} nearly used up`);
+  }
   return bits;
 }
 
