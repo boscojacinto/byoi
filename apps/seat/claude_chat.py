@@ -493,6 +493,7 @@ class ClaudeChat:
         self.workspace_path: Path | None = None
         self.account_label: str | None = None
         self.config_dir: Path | None = None
+        self.byo = False
         self._swallow_result = False
         self.quota: dict[str, Any] | None = None
         self.handoff_text: str | None = None
@@ -517,15 +518,26 @@ class ClaudeChat:
         clear_submit(self.config_dir)
         self.account_label = account.label if account else None
         self.config_dir = account.config_dir if account else None
+        self.byo = False
         if account is None:
             return
         from .accounts import accounts_dir
+        from .guest_auth import guest_root
 
-        try:
-            account.config_dir.resolve().relative_to(accounts_dir())
-        except ValueError:
+        # Hooks are what make the status line, PostCompact, StopFailure and
+        # byoi-submit.sh work — without them the seat loses quota tracking and
+        # grading stops. Install them for salon accounts and for a guest's own
+        # ephemeral account, but never anywhere else: the pool falls back to
+        # ~/.claude, and that is the operator's own config, not ours to write to.
+        config_dir = account.config_dir.resolve()
+        for root, is_guest in ((accounts_dir(), False), (guest_root(), True)):
+            try:
+                config_dir.relative_to(root)
+            except ValueError:
+                continue
+            self.byo = is_guest
+            self.pool.ensure_hooks(account)
             return
-        self.pool.ensure_hooks(account)
 
     def assign_preferred(self, seat_id: str | None = None) -> Account | None:
         account = self.pool.pick(preferred=preferred_label(seat_id))
@@ -545,6 +557,7 @@ class ClaudeChat:
             "usage": self.last_usage,
             "suggestions": list(self.suggestions),
             "account": self.account_label,
+            "byo": self.byo,
             "quota": dict(self.quota) if self.quota else None,
             "handoff": bool(self.handoff_text),
             "handoff_text": self.handoff_text,
@@ -774,18 +787,29 @@ class ClaudeChat:
                 return info
         return parse_limit_error(self.last_error)
 
+    def _spare(self) -> Account | None:
+        """A salon account to fail over to, or None on a guest's own account.
+
+        Moving a BYO session onto a salon account would put the guest's work on
+        the salon's billing mid-sentence, without either of them agreeing to it.
+        The host can still switch deliberately from the desk.
+        """
+        if self.byo:
+            return None
+        return self.pool.pick(excluding=self.account_label)
+
     def failover_plan(self, events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Decide compact / switch / opus / none. Pure enough to unit-test."""
         events = events or []
         if self._phase == "switching":
             return {"action": "none"}
         if self._phase == "compacting":
-            spare = self.pool.pick(excluding=self.account_label)
+            spare = self._spare()
             return {"action": "switch" if spare else "no_spare", "account": spare, "reason": "compacted"}
         limit = self._limit_from_events(events)
         if limit and limit.kind == "opus":
             return {"action": "opus", "limit": limit}
-        spare = self.pool.pick(excluding=self.account_label)
+        spare = self._spare()
         if limit and limit.kind in {"session", "weekly", "daily", "usage"}:
             if not spare:
                 return {"action": "no_spare", "limit": limit}
@@ -811,12 +835,13 @@ class ClaudeChat:
             self._failover_task = asyncio.create_task(self.send_user("/model sonnet"))
             return
         if action == "no_spare":
-            await self._broadcast(
-                {
-                    "type": "error",
-                    "message": "Claude account hit a usage limit and no spare login is ready on this seat.",
-                }
+            message = (
+                "Your Claude account hit a usage limit. The salon can take over on "
+                "one of its own accounts — ask the host."
+                if self.byo
+                else "Claude account hit a usage limit and no spare login is ready on this seat."
             )
+            await self._broadcast({"type": "error", "message": message})
             return
         if action == "compact":
             self._phase = "compacting"

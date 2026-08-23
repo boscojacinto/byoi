@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import os
@@ -88,13 +89,33 @@ async def _lifespan(application: FastAPI):
     logging.getLogger("uvicorn.error").info(
         "BYOI seat ready · guest PWA :8787 · control mTLS :8788"
     )
+    sweeper = asyncio.create_task(_sweep_guest_logins())
     try:
         yield
     finally:
+        sweeper.cancel()
         if control:
             server, task = control
             server.should_exit = True
             await task
+
+
+async def _sweep_guest_logins() -> None:
+    """Kill sign-ins a guest walked away from — otherwise the pty and its tmpfs
+    directory stay open until the seat is freed."""
+    from . import guest_auth
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            for sid in guest_auth.sweep():
+                logging.getLogger("uvicorn.error").info(
+                    "BYOI: abandoned guest sign-in for %s timed out", sid
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # a sweeper must never take the seat down
+            logging.getLogger("uvicorn.error").exception("BYOI: guest login sweep failed")
 
 
 _state = {
@@ -236,6 +257,83 @@ def guest_handoff(request: Request, ticket: str) -> Response:
     if not text:
         raise HTTPException(404, "no compact handoff yet")
     return Response(text, media_type="text/markdown; charset=utf-8")
+
+
+class ByoIn(BaseModel):
+    ticket: str | None = None
+    code: str | None = None
+
+
+def _guest_session_id() -> str | None:
+    return gate.snapshot().get("session_id")
+
+
+def _byo_guard(request: Request, body: ByoIn | None) -> str | None:
+    if not client_allowed(_request_host(request)) and not UNLOCK_OPEN:
+        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+    _require_ticket(body.ticket if body else None)
+    return _guest_session_id()
+
+
+@app.post("/local/byo/start")
+async def byo_start(request: Request, body: ByoIn | None = None) -> dict:
+    """Begin a sign-in the guest completes on their own phone."""
+    session_id = _byo_guard(request, body)
+    from . import guest_auth
+
+    try:
+        started = await guest_auth.begin_login(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if started.get("done"):
+        # A callback finished the flow without a code; adopt it straight away.
+        chat_session.reset()
+        chat_session.assign_account(guest_auth.guest_account(session_id))
+    return {
+        **started,
+        "seat_id": SEAT_ID,
+        "byo": chat_session.byo,
+        "warnings": guest_auth.storage_warnings(),
+    }
+
+
+@app.post("/local/byo/code")
+async def byo_code(request: Request, body: ByoIn | None = None) -> dict:
+    """Hand the guest's authorization code to the waiting sign-in."""
+    session_id = _byo_guard(request, body)
+    from . import guest_auth
+
+    try:
+        done = await guest_auth.submit_code(session_id, (body.code if body else "") or "")
+    except LookupError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    # A fresh account means a fresh session: never carry the salon account's
+    # conversation into the guest's own.
+    chat_session.reset()
+    chat_session.assign_account(guest_auth.guest_account(session_id))
+    return {**done, "seat_id": SEAT_ID, "byo": chat_session.byo}
+
+
+@app.post("/local/byo/cancel")
+async def byo_cancel(request: Request, body: ByoIn | None = None) -> dict:
+    """Drop the guest's account and go back to a salon one."""
+    session_id = _byo_guard(request, body)
+    from . import guest_auth
+
+    result = await guest_auth.teardown(session_id)
+    chat_session.reset()
+    account = chat_session.assign_preferred(SEAT_ID)
+    return {
+        "ok": True,
+        "seat_id": SEAT_ID,
+        "byo": chat_session.byo,
+        "account": account.label if account else None,
+        **result,
+    }
 
 
 @app.get("/local/workspace")

@@ -147,6 +147,13 @@ On the phone: same Wi-Fi, scan, pick a solution, **Chat**. Claude Code runs
 on the seat; the phone is messages, tools, diffs, files, photos, plan/code
 modes, and a session timer.
 
+**Your own Claude account.** A guest who already pays for Claude can tap **Use my
+own Claude account** and run the session on theirs. They sign in on their own
+phone — their password never reaches the seat — and the token that does is kept on
+tmpfs and revoked and deleted when the seat is freed. It is a full-access Claude
+Code token, not a narrowed one: the phone names what it can do before the guest
+approves. It is also not private from the operator while the session runs.
+
 **Solutions.** Each board item can have a **project** (new GitHub repo, clone,
 or a folder on this PC). Claiming it sets the seat workspace to that folder.
 An optional **acceptance spec** runs when the guest taps **I'm done** — the

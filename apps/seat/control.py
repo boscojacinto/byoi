@@ -79,6 +79,7 @@ def health() -> dict:
         "mtls": True,
         "tmux": SESSION,
         "account": chat_session.account_label,
+        "byo": chat_session.byo,
         "accounts": chat_session.pool.snapshot(current=chat_session.account_label),
         **gate.snapshot(),
     }
@@ -118,18 +119,23 @@ def revoke(request: Request, authorization: str | None = Header(default=None)) -
     # Grab the session before the gate forgets it — the local stack is keyed on it.
     session_id = gate.snapshot().get("session_id")
     gate.revoke()
+    from . import guest_auth
     from .claude_chat import session as chat_session
     from .infra import down
 
     chat_session.reset()
     chat_session.assign_account(None)
     infra = {"removed": False}
+    # Revoke the guest's own Claude token and erase the ephemeral account before
+    # anything slower runs. Deleting the file alone would leave a live refresh
+    # token; teardown logs out first, then unlinks.
+    byo = guest_auth.teardown_sync(session_id)
     if session_id:
         try:
             infra = down(str(session_id))
         except Exception as exc:  # teardown must never block freeing the seat
             infra = {"ok": False, "removed": False, "detail": str(exc)}
-    return {"ok": True, "seat_id": SEAT_ID, "admitted": False, "infra": infra}
+    return {"ok": True, "seat_id": SEAT_ID, "admitted": False, "infra": infra, "byo": byo}
 
 
 @app.post("/local/workspace")
@@ -154,6 +160,7 @@ def list_accounts(request: Request, authorization: str | None = Header(default=N
     return {
         "seat_id": SEAT_ID,
         "account": chat_session.account_label,
+        "byo": chat_session.byo,
         "quota": chat_session.quota,
         "accounts": chat_session.pool.snapshot(current=chat_session.account_label),
         "handoff": bool(chat_session.handoff_text),

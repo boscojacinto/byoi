@@ -61,6 +61,71 @@ def user_text(msg: dict) -> str:
     return "".join(parts)
 
 
+CREDENTIALS = CONFIG / ".credentials.json"
+FAKE_URL = "https://claude.ai/oauth/authorize?code=true&client_id=fake&scope=user%3Ainference"
+GOOD_CODE = os.environ.get("BYOI_FAKE_AUTH_CODE", "good-code")
+
+
+def write_credentials() -> None:
+    CREDENTIALS.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-fake",
+                    "refreshToken": "fake-refresh",
+                    "expiresAt": int(time.time() * 1000) + 3600_000,
+                    "refreshTokenExpiresAt": int(time.time() * 1000) + 86_400_000,
+                    "scopes": (os.environ.get("CLAUDE_CODE_OAUTH_SCOPES") or "user:inference").split(),
+                    "subscriptionType": "pro",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    CREDENTIALS.chmod(0o600)
+
+
+def auth(argv: list[str]) -> int:
+    """Stand in for `claude auth login|logout|status`, including the code paste."""
+    sub = argv[0] if argv else ""
+    if sub == "login":
+        print(f"Open this URL to sign in:\n\n  {FAKE_URL}\n", flush=True)
+        print("Paste code here if prompted > ", end="", flush=True)
+        code = (sys.stdin.readline() or "").strip()
+        if code != GOOD_CODE:
+            print("\nInvalid authorization code.", flush=True)
+            return 1
+        write_credentials()
+        print("\nLogged in.", flush=True)
+        return 0
+    if sub == "logout":
+        if CREDENTIALS.is_file():
+            # Real Claude Code blanks the fields in place rather than unlinking.
+            CREDENTIALS.write_text(
+                json.dumps(
+                    {"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0}}
+                ),
+                encoding="utf-8",
+            )
+        return 0
+    if sub == "status":
+        try:
+            data = json.loads(CREDENTIALS.read_text(encoding="utf-8"))
+            live = bool(data.get("claudeAiOauth", {}).get("accessToken"))
+        except (OSError, json.JSONDecodeError):
+            live = False
+        emit(
+            {
+                "loggedIn": live,
+                "authMethod": "claude.ai",
+                "email": "guest@example.test" if live else None,
+                "subscriptionType": "pro" if live else None,
+            }
+        )
+        return 0
+    return 2
+
+
 def main() -> None:
     inited = False
     for raw in sys.stdin:
@@ -133,6 +198,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) > 1 and sys.argv[1] == "auth":
+            sys.exit(auth(sys.argv[2:]))
         main()
     except (BrokenPipeError, KeyboardInterrupt):
         pass
