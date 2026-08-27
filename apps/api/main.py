@@ -2,22 +2,38 @@
 
 from __future__ import annotations
 
+import hmac
+import logging
 import os
 import ssl
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from apps.host_token import token_is_weak, token_matches
+from apps.secrets import read_secret
 
+from . import caddy
 from . import deploy as deploy_ops
+from . import infra as desk_infra
+from . import operator
+from . import seats
 from . import projects as project_ops
 from . import seat_sync
 from . import testgen
+from . import printing
 from .printing import print_slip
 from .deploy import DeployError
 from .seat_sync import SeatSyncError
@@ -25,8 +41,23 @@ from .testgen import TestgenError
 from .slips import WIFI_SSID, compose_checkin_slip, public_base, public_host, save_join_qr, seat_join_url
 from .store import Store
 
+log = logging.getLogger("uvicorn.error")
+
 ROOT = Path(__file__).resolve().parents[2]
 SALON_NAME = os.environ.get("BYOI_SALON_NAME", "BYOI salon · cafe")
+
+
+# How long after the relay last polled we still call the printer online.
+RELAY_OFFLINE_AFTER = 90.0
+
+
+def on_demand_seats() -> bool:
+    """Whether the desk raises a seat container per visit.
+
+    Off by default so the repo still runs on one salon PC with a seat agent
+    already up, which is what scripts/run-seat.sh gives you.
+    """
+    return os.environ.get("BYOI_SEATS", "static").strip().lower() == "ondemand"
 HOST_WEB = ROOT / "apps" / "host-web"
 CODER_WEB = ROOT / "apps" / "coder"
 GUEST_WEB = ROOT / "apps" / "guest-web"
@@ -60,6 +91,15 @@ class BoardProjectIn(BaseModel):
     project_id: str | None = None
 
 
+class LoginIn(BaseModel):
+    password: str
+
+
+class PrintDoneIn(BaseModel):
+    ok: bool = True
+    error: str | None = None
+
+
 class CheckInIn(BaseModel):
     seat_id: str
     coder_name: str
@@ -72,28 +112,88 @@ class ClaimIn(BaseModel):
 def create_app(data_dir: Path | None = None) -> FastAPI:
     data = Path(data_dir or os.environ.get("BYOI_DATA", ROOT / "data"))
     store = Store(data / "salon.db")
-    app = FastAPI(title="BYOI salon", version="0.1.0")
+    _relay: dict[str, float] = {}
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        if on_demand_seats():
+            try:
+                gone = seats.reconcile(store)["removed"]
+                if gone:
+                    log.info("BYOI: cleared %d seat(s) with no live session", len(gone))
+            except seats.SeatError as exc:
+                log.warning("BYOI: could not reconcile seats at startup: %s", exc)
+        yield
+
+    app = FastAPI(title="BYOI salon", version="0.1.0", lifespan=lifespan)
     if HOST_WEB.is_dir():
         app.mount("/host/assets", StaticFiles(directory=HOST_WEB), name="host-assets")
     if CODER_WEB.is_dir():
         app.mount("/coder/assets", StaticFiles(directory=CODER_WEB), name="coder-assets")
 
-    def is_desk(request: Request) -> bool:
-        """True when the operator is on this PC (same-machine host + seat)."""
-        host = request.client.host if request.client else ""
-        return host in {"127.0.0.1", "::1", "localhost"}
+    def require_operator(request: Request, authorization: str | None) -> None:
+        """A signed desk cookie, or the host token for machine callers.
 
-    def require_host(request: Request, authorization: str | None) -> None:
+        There is deliberately no same-machine shortcut. The desk sits behind a
+        reverse proxy now, so every request appears to come from the proxy — a
+        loopback test there does not identify the operator, it admits everyone.
+        """
         if token_is_weak():
             raise HTTPException(503, "set a non-default BYOI_HOST_TOKEN (scripts/salon-tls.sh)")
-        if is_desk(request):
+        if operator.read_cookie(request.cookies.get(operator.COOKIE_NAME)):
             return
-        if not token_matches(authorization):
-            raise HTTPException(401, "host token required — open http://127.0.0.1:8080/ on this PC")
+        if token_matches(authorization):
+            return
+        raise HTTPException(401, "sign in to the desk")
+
+    @app.middleware("http")
+    async def slide_operator_cookie(request: Request, call_next):
+        """Keep an active operator signed in without extending the hard deadline."""
+        response = await call_next(request)
+        claims = operator.read_cookie(request.cookies.get(operator.COOKIE_NAME))
+        if claims and claims.stale():
+            response.set_cookie(value=operator.refresh_cookie(claims), **operator.cookie_kwargs())
+        return response
+
+    def client_ip(request: Request) -> str:
+        """The guest's address. Correct only because uvicorn runs with
+        --proxy-headers and --forwarded-allow-ips set to the proxy."""
+        return request.client.host if request.client else "unknown"
 
     @app.get("/api/health")
     def health() -> dict:
         return {"ok": True, "salon": SALON_NAME}
+
+    @app.get("/api/session")
+    def get_session(request: Request) -> dict:
+        claims = operator.read_cookie(request.cookies.get(operator.COOKIE_NAME))
+        return {
+            "signed_in": bool(claims),
+            "password_set": operator.password_is_set(),
+            "expires_at": claims.expires_at if claims else None,
+            "salon": SALON_NAME,
+        }
+
+    @app.post("/api/login")
+    def post_login(request: Request, body: LoginIn) -> Response:
+        if not operator.password_is_set():
+            raise HTTPException(503, "no operator password set — run scripts/salon-secrets.sh operator")
+        who = client_ip(request)
+        wait = operator.throttle.locked_for(who)
+        if wait:
+            raise HTTPException(429, f"too many attempts — try again in {int(wait) // 60 + 1} min")
+        if not operator.verify_password(body.password):
+            operator.throttle.record_failure(who)
+            raise HTTPException(401, "wrong password")
+        operator.throttle.clear(who)
+        response = JSONResponse({"ok": True, "salon": SALON_NAME})
+        response.set_cookie(value=operator.issue_cookie(), **operator.cookie_kwargs())
+        return response
+
+    @app.post("/api/logout")
+    def post_logout() -> Response:
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(operator.COOKIE_NAME, path="/")
+        return response
 
     @app.get("/api/board")
     def get_board() -> dict:
@@ -101,7 +201,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/board")
     def post_board(request: Request, body: BoardIn, authorization: str | None = Header(default=None)) -> dict:
-        require_host(request, authorization)
+        require_operator(request, authorization)
         try:
             return store.add_board(
                 body.title,
@@ -120,7 +220,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/projects")
     def post_project(request: Request, body: ProjectIn, authorization: str | None = Header(default=None)) -> dict:
-        require_host(request, authorization)
+        require_operator(request, authorization)
         try:
             if body.kind == "template":
                 made = project_ops.from_template(
@@ -166,7 +266,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         body: BoardProjectIn,
         authorization: str | None = Header(default=None),
     ) -> dict:
-        require_host(request, authorization)
+        require_operator(request, authorization)
         try:
             return store.set_board_project(board_id, body.project_id)
         except KeyError as exc:
@@ -178,7 +278,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/claude-accounts")
     def claude_accounts(request: Request, authorization: str | None = Header(default=None)) -> dict:
-        require_host(request, authorization)
+        require_operator(request, authorization)
         try:
             return seat_sync.list_accounts()
         except SeatSyncError:
@@ -196,25 +296,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(404, "no compact handoff yet")
         return Response(text, media_type="text/markdown; charset=utf-8")
 
-    @app.post("/api/sessions/check-in")
-    def check_in(request: Request, body: CheckInIn, authorization: str | None = Header(default=None)) -> dict:
-        require_host(request, authorization)
-        try:
-            sess = store.check_in(body.seat_id, body.coder_name)
-        except KeyError as exc:
-            raise HTTPException(404, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        seat = store.seat(body.seat_id)
-        assert seat
-        try:
-            seat_sync.admit_session(seat, sess)
-        except SeatSyncError as exc:
-            store.free_seat(body.seat_id)
-            raise HTTPException(
-                502,
-                "seat did not accept the OTP — is the seat agent up on this PC?",
-            ) from exc
+    def _slip_for(sess: dict, seat: dict) -> dict:
+        """Compose, print, and record the check-in slip for a ready seat."""
         join = seat_join_url(seat, sess["unlock_otp"])
         image = compose_checkin_slip(
             salon=SALON_NAME,
@@ -224,29 +307,131 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             otp=sess["unlock_otp"],
             wellness_minutes=90,
             break_after=50,
-            wifi_ssid=WIFI_SSID,
+            wifi_ssid=None if on_demand_seats() else WIFI_SSID,
             join=join,
         )
-        printed = print_slip(image, data)
+        payload = {"session_id": sess["id"], "otp": sess["unlock_otp"], "seat": seat.get("name")}
+        if printing.print_mode() == "relay":
+            # The printer is at the counter and the desk is not. Queue the slip
+            # and carry on — the QR is on screen either way, so a printer that
+            # is offline delays a piece of paper, not the check-in.
+            job_id = store.enqueue_print("check-in", payload, None)
+            png = printing.save_slip_png(image, data, job_id)
+            store.set_print_png(job_id, str(png))
+            printed = {"mode": "relay", "job": job_id, "status": "queued", "png": str(png)}
+        else:
+            printed = print_slip(image, data)
+            store.log_print("check-in", payload, printed.get("png"))
         qr_path = save_join_qr(join, data)
-        store.log_print("check-in", {"session_id": sess["id"], "otp": sess["unlock_otp"]}, printed.get("png"))
         host = public_host(seat["agent_url"])
         return {
-            "session": sess,
             "join": join,
             "ssh": f"ssh guest@{host}",
             "guest": "/guest/",
             "tmux": "tmux attach -t claude-guest",
             "print": printed,
             "qr": str(qr_path),
+        }
+
+    def _raise_seat(sess: dict, seat: dict) -> None:
+        """Background half of a cloud check-in.
+
+        The container, its certificate, and its public hostname all have to
+        exist before the slip is worth printing — a QR pointing at a seat that
+        is not up yet is worse than a guest waiting ten seconds for one.
+        """
+        try:
+            seats.provision(store, sess, seat)
+            ready = store.seat(seat["id"]) or seat
+            _slip_for(sess, ready)
+            store.set_seat_runtime(seat["id"], state="ready", public_host=ready.get("public_host"))
+        except (seats.SeatError, SeatSyncError, caddy.CaddyError) as exc:
+            log.warning("BYOI: could not raise a seat for %s: %s", sess["id"], exc)
+            _abandon_seat(sess, seat, str(exc))
+        except Exception as exc:  # noqa: BLE001 - a check-in must not wedge the desk
+            log.exception("BYOI: unexpected failure raising a seat for %s", sess["id"])
+            _abandon_seat(sess, seat, str(exc))
+
+    def _abandon_seat(sess: dict, seat: dict, why: str) -> None:
+        """Clean up a half-raised seat, then leave the reason on the chair.
+
+        Order matters: teardown clears the chair's runtime columns, so recording
+        the failure first would erase it before the desk could poll for it.
+        """
+        seats.teardown(store, sess, seat)
+        store.free_seat(seat["id"])
+        store.set_seat_runtime(seat["id"], state="failed", error=why)
+
+    @app.post("/api/sessions/check-in")
+    def check_in(
+        request: Request,
+        body: CheckInIn,
+        background: BackgroundTasks,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        require_operator(request, authorization)
+        try:
+            sess = store.check_in(body.seat_id, body.coder_name)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        seat = store.seat(body.seat_id)
+        assert seat
+
+        if on_demand_seats():
+            store.set_seat_runtime(body.seat_id, state="preparing")
+            background.add_task(_raise_seat, sess, seat)
+            return {
+                "session": sess,
+                "state": "preparing",
+                "otp": sess["unlock_otp"],
+                "seat_admitted": False,
+                "poll": f"/api/sessions/{sess['id']}/seat",
+            }
+
+        try:
+            seat_sync.admit_session(seat, sess)
+        except SeatSyncError as exc:
+            store.free_seat(body.seat_id)
+            raise HTTPException(
+                502,
+                "seat did not accept the OTP — is the seat agent up on this PC?",
+            ) from exc
+        return {
+            "session": sess,
+            "state": "ready",
+            **_slip_for(sess, seat),
             "otp": sess["unlock_otp"],
             "seat_admitted": True,
         }
 
+    @app.get("/api/sessions/{session_id}/seat")
+    def seat_state(request: Request, session_id: str, authorization: str | None = Header(default=None)) -> dict:
+        """Where a check-in has got to. The desk polls this while a seat comes up."""
+        require_operator(request, authorization)
+        sess = store.session(session_id)
+        if not sess:
+            raise HTTPException(404, "unknown session")
+        seat = store.seat(sess["seat_id"]) or {}
+        state = seat.get("state") or ("ready" if sess["status"] != "done" else "idle")
+        out = {
+            "session": sess,
+            "seat": seat,
+            "state": state,
+            "error": seat.get("error"),
+            "otp": sess["unlock_otp"],
+        }
+        if state == "ready":
+            out["join"] = seat_join_url(seat, sess["unlock_otp"])
+            out["qr"] = str(data / "last-qr.png")
+            out["public_host"] = seat.get("public_host")
+        return out
+
     @app.get("/api/live")
     def api_live(request: Request, seat_id: str | None = None, authorization: str | None = Header(default=None)) -> dict:
         """Mirror of each occupied seat's guest chat (Claude Code stream)."""
-        require_host(request, authorization)
+        require_operator(request, authorization)
         seats = store.seats()
         if seat_id:
             seats = [s for s in seats if s["id"] == seat_id]
@@ -264,10 +449,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def _infra_job(session_id: str, seat: dict | None, path: str) -> None:
         """Pulling images takes a while; never make the guest wait on the claim."""
         try:
-            seat_sync.infra_up(seat, session_id=session_id, cwd=path)
+            if on_demand_seats():
+                # The desk owns Docker. The seat only gets told where the
+                # database ended up — see apps/api/infra.py.
+                env = desk_infra.up(
+                    session_id=session_id, container=seats.container_name(session_id)
+                )
+                seat_sync.push_infra_env(
+                    seat, session_id=session_id, env=desk_infra.public_env(env), cwd=path
+                )
+            else:
+                seat_sync.infra_up(seat, session_id=session_id, cwd=path)
         except Exception:
             # The guest can retry from the chat; a cold stack is not a failed claim.
-            pass
+            log.warning("BYOI: infrastructure for %s did not come up", session_id, exc_info=True)
 
     @app.post("/api/sessions/{session_id}/claim")
     def claim(session_id: str, body: ClaimIn, background_tasks: BackgroundTasks) -> dict:
@@ -309,6 +504,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     def _revoke_seat(seat: dict | None, session_id: str | None = None) -> None:
         _teardown_deployment(session_id)
+        if on_demand_seats() and seat and session_id:
+            # The whole container goes, tmpfs and all, so there is no OTP left
+            # to drop. teardown() revokes the guest's own Claude token first and
+            # records rather than raises: an operator with a guest standing
+            # there must always be able to free the chair.
+            result = seats.teardown(store, {"id": session_id}, seat)
+            for problem in result.get("problems", []):
+                log.warning("BYOI: freeing %s — %s", seat.get("id"), problem)
+            return
         try:
             seat_sync.revoke_session(seat)
         except SeatSyncError as exc:
@@ -316,7 +520,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/seats/free-all")
     def free_all(request: Request, authorization: str | None = Header(default=None)) -> dict:
-        require_host(request, authorization)
+        require_operator(request, authorization)
         seen: set[str] = set()
         for seat in store.seats():
             live = store._live_session(seat["id"])
@@ -330,7 +534,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/seats/{seat_id}/free")
     def free_seat(request: Request, seat_id: str, authorization: str | None = Header(default=None)) -> dict:
-        require_host(request, authorization)
+        require_operator(request, authorization)
         seat = store.seat(seat_id)
         if not seat:
             raise HTTPException(404, "unknown seat")
@@ -497,6 +701,84 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         item = store.board_item(sess["board_id"]) if sess.get("board_id") else None
         return {"session": sess, "item": item, "seat": store.seat(sess["seat_id"])}
 
+    def _live_seat_url() -> str:
+        """The seat a guest on the desk's own origin is talking to.
+
+        With one seat per session there is no single address to hardcode, so the
+        live one is looked up. The env override stays for the salon PC, where
+        there is exactly one seat agent and it is not this process.
+        """
+        override = os.environ.get("BYOI_SEAT_URL", "").strip()
+        if override:
+            return override
+        for seat in store.seats():
+            if seat.get("session") and seat.get("agent_url"):
+                return seat["agent_url"]
+        return "https://127.0.0.1:8787"
+
+    def require_relay(request: Request, authorization: str | None) -> None:
+        """The venue's printer agent, or an operator looking at the queue."""
+        token = read_secret("BYOI_PRINT_RELAY_TOKEN")
+        if token:
+            presented = (authorization or "").strip()
+            expected = f"Bearer {token}"
+            if len(presented) == len(expected) and hmac.compare_digest(presented, expected):
+                _relay["seen_at"] = time.time()
+                return
+        require_operator(request, authorization)
+
+    @app.get("/api/print/status")
+    def print_status(request: Request, authorization: str | None = Header(default=None)) -> dict:
+        require_operator(request, authorization)
+        seen = _relay.get("seen_at")
+        return {
+            "mode": printing.print_mode(),
+            # The relay polls; if it has not in a while, the counter's printer
+            # is unreachable and the operator should know before a guest waits.
+            "online": bool(seen and time.time() - seen < RELAY_OFFLINE_AFTER),
+            "seen_at": seen,
+            **store.print_queue(),
+        }
+
+    @app.get("/api/print/next")
+    def print_next(request: Request, authorization: str | None = Header(default=None)) -> Response:
+        """Hand the relay the next slip. 204 when there is nothing to print."""
+        require_relay(request, authorization)
+        _relay["seen_at"] = time.time()
+        job = store.claim_print_job()
+        if not job:
+            return Response(status_code=204)
+        return JSONResponse(
+            {
+                "id": job["id"],
+                "kind": job["kind"],
+                "payload": job["payload"],
+                "png": f"/api/print/{job['id']}.png",
+            }
+        )
+
+    @app.get("/api/print/{job_id}.png")
+    def print_png(request: Request, job_id: str, authorization: str | None = Header(default=None)) -> FileResponse:
+        require_relay(request, authorization)
+        job = store.print_job(job_id)
+        path = Path(job["dumped_path"]) if job and job.get("dumped_path") else None
+        if not path or not path.is_file():
+            raise HTTPException(404, "no image for this print job")
+        return FileResponse(path, media_type="image/png", filename=f"{job_id}.png")
+
+    @app.post("/api/print/{job_id}/done")
+    def print_done(
+        request: Request,
+        job_id: str,
+        body: PrintDoneIn,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        require_relay(request, authorization)
+        job = store.finish_print_job(job_id, ok=body.ok, error=body.error)
+        if not job:
+            raise HTTPException(404, "unknown print job")
+        return {"job": job}
+
     @app.get("/api/join")
     def join(otp: str) -> dict:
         sess = store.session_by_otp(otp)
@@ -505,13 +787,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if sess["status"] == "done":
             raise HTTPException(410, "session finished")
         seat = store.seat(sess["seat_id"])
-        agent = public_base(seat["agent_url"]) if seat else None
+        agent = (
+            public_base(seat["agent_url"], public_host=seat.get("public_host")) if seat else None
+        )
         return {
             "session": sess,
             "seat": seat,
             "board": store.board(),
             "seat_agent": agent,
-            "wifi_ssid": WIFI_SSID,
+            # None when the seat is a cloud container: there is no salon Wi-Fi
+            # for the guest to be on, and naming one sends them looking for it.
+            "wifi_ssid": None if on_demand_seats() else WIFI_SSID,
         }
 
     @app.get("/join")
@@ -522,7 +808,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/local/unlock")
     async def unlock_via_seat(request: Request):
         """Forward unlock to the seat agent so the PWA can stay same-origin on :8080."""
-        seat_url = os.environ.get("BYOI_SEAT_URL", "https://127.0.0.1:8787")
+        seat_url = _live_seat_url()
         verify: bool | ssl.SSLContext = True
         try:
             from apps.tls import guest_verify_context, paths as tls_paths
@@ -547,7 +833,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.get("/local/handoff")
     async def handoff_via_seat(request: Request, ticket: str) -> Response:
         """Forward compact handoff so the PWA can stay same-origin on :8080."""
-        seat_url = os.environ.get("BYOI_SEAT_URL", "https://127.0.0.1:8787")
+        seat_url = _live_seat_url()
         verify: bool | ssl.SSLContext = True
         try:
             from apps.tls import guest_verify_context, paths as tls_paths

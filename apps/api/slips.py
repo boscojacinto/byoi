@@ -43,11 +43,19 @@ def lan_ip() -> str:
         return "127.0.0.1"
 
 
-def public_base(url: str, default_port: int = 8787) -> str:
-    """Turn a seat agent URL into something a phone on cafe Wi-Fi can open."""
+def public_base(url: str, default_port: int = 8787, *, public_host: str | None = None) -> str:
+    """The address a guest's phone actually opens.
+
+    In the cloud that is the session's own hostname on the edge, with a real
+    certificate and no port — so it is short enough to read off a slip and no
+    browser warns about it. On a salon PC it is still ``https://<lan-ip>:8787``,
+    where the seat holds the salon CA's certificate itself.
+    """
     override = os.environ.get("BYOI_JOIN_BASE", "").rstrip("/")
     if override:
         return override
+    if public_host:
+        return f"https://{public_host}"
     raw = url if "://" in url else f"http://{url}"
     parsed = urlparse(raw)
     host = parsed.hostname or "127.0.0.1"
@@ -63,10 +71,13 @@ def public_host(url: str, default_port: int = 8787) -> str:
 
 
 def join_base() -> str:
-    """House PWA on cafe Wi-Fi (same laptop or desk host)."""
+    """Where the desk itself is reachable."""
     override = os.environ.get("BYOI_JOIN_BASE", "").rstrip("/")
     if override:
         return override
+    public = os.environ.get("BYOI_PUBLIC_BASE", "").rstrip("/")
+    if public:
+        return public
     port = os.environ.get("BYOI_HOUSE_PORT", "8080")
     return f"http://{lan_ip()}:{port}"
 
@@ -76,7 +87,10 @@ def join_url(otp: str) -> str:
 
 
 def seat_join_url(seat: dict, otp: str) -> str:
-    base = public_base(seat.get("agent_url") or "http://127.0.0.1:8787")
+    base = public_base(
+        seat.get("agent_url") or "http://127.0.0.1:8787",
+        public_host=seat.get("public_host"),
+    )
     return f"{base}/join?otp={otp}"
 
 
@@ -136,7 +150,7 @@ def compose_checkin_slip(
     otp: str,
     wellness_minutes: int,
     break_after: int,
-    wifi_ssid: str,
+    wifi_ssid: str | None,
     join: str,
 ) -> Image.Image:
     width = A6_304.row_width
@@ -149,9 +163,14 @@ def compose_checkin_slip(
     )
     parsed = urlparse(join)
     hostport = parsed.netloc or join
-    body_lines = [
-        board_title or "(pick a brief at the seat)",
-        f"Same Wi-Fi as this PC  {wifi_ssid}",
+    body_lines = [board_title or "(pick a brief at the seat)"]
+    if wifi_ssid:
+        # Only true when the seat is a PC in this room. A cloud seat is reached
+        # over whatever network the phone already has, and telling a guest to
+        # join the cafe Wi-Fi would send them looking for a password they do
+        # not need.
+        body_lines.append(f"Same Wi-Fi as this PC  {wifi_ssid}")
+    body_lines += [
         "Open BYOI Guest · scan this QR",
         f"OTP  {otp}",
         hostport,

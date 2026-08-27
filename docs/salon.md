@@ -1,16 +1,38 @@
 # BYOI salon (coding + wellness)
 
-Each **seat** is a Linux PC running Claude Code. The guest phone and that PC
-are on the **same Wi-Fi**. Guests never log into Claude. The seat operator
-runs `claude setup-token` once; guests open the **BYOI Guest** PWA and chat
-after an **OTP** the host printed on the slip.
+A **seat** runs Claude Code. Guests never log into Claude: the operator runs
+`claude setup-token` once per account, and guests open the **BYOI Guest** PWA
+and chat after an **OTP** the host printed on the slip.
 
 This is a phone chat, like the Claude Code mobile app — not a terminal mirror.
 
+## Where this runs
+
+Two shapes, same code. `BYOI_SEATS` picks.
+
+| | `static` (default) | `ondemand` |
+|---|---|---|
+| A seat is | a Linux PC in the room | a container the desk raises at check-in |
+| The guest's phone | must be on the seat's Wi-Fi | anywhere; the seat has a public hostname |
+| Guest TLS | the seat, with the salon CA | Caddy, with a real certificate |
+| The phone must install `ca.pem` | yes | no |
+| Postgres / Redis for a brief | `docker compose` on the seat | raised by the desk, on a per-session network |
+| The PeriPage | on the seat PC's Bluetooth | at the counter, fed by `scripts/print-relay.py` |
+| Bring it up with | `run-salon.sh` + `run-seat.sh` | `scripts/cloud-up.sh` |
+
 ```
-Host desk  --mTLS + token-->  Seat control :8788  (admit / revoke OTP)
-Phone PWA  --HTTPS + OTP--->  Seat guest   :8787  --ticket-->  Claude Code chat
+static:
+  Host desk  --mTLS + token-->  Seat control :8788  (admit / revoke OTP)
+  Phone PWA  --HTTPS + OTP--->  Seat guest   :8787  --ticket-->  Claude Code chat
+
+ondemand:
+  Phone  --https://s-<session>.<domain>-->  Caddy  -->  byoi-seat-<session>:8787
+  Desk   --mTLS + token---------------->  byoi-seat-<session>:8788
+  Desk   --docker------------------------>  the seat, its Postgres, its Redis
+  Counter  print-relay.py  --https-->  desk print queue  --BLE-->  PeriPage A6
 ```
+
+The rest of this document describes both. Where they differ it says so.
 
 ## Trust (host ↔ seat)
 
@@ -31,29 +53,69 @@ DHCP moves. The **certificate** is the identity.
 ./scripts/salon-tls.sh
 ```
 
-On **one PC** (host + seat together) you do not paste a token. After TLS:
+On **one PC** (host + seat together):
 
 ```bash
 ./scripts/run-salon.sh    # :8080
 ./scripts/run-seat.sh     # :8787 guests + :8788 mTLS
 ```
 
-Open the desk at **http://127.0.0.1:8080/** (loopback, not the LAN IP). Check-in
-is allowed from this machine; phones on cafe Wi-Fi cannot use the desk page.
-
 Two machines: export `BYOI_TLS_DIR`, `BYOI_HOST_TOKEN_FILE`, and
 `BYOI_SEAT_CONTROL_URL=https://<seat-ip>:8788`.
 
 Keep `ca-key.pem` off the cafe LAN.
 
-Guests use **HTTPS** on `:8787` with the same salon CA. The seat certificate
-lists the current LAN IPs in SAN so `https://<seat-ip>:8787` verifies. If
-DHCP moves the seat, re-run `./scripts/salon-tls.sh` (CA stays; seat cert is
-reissued). Safari/Chrome will warn until the guest installs `ca.pem`
+### Signing in to the desk
+
+**There is no same-machine shortcut, in either mode.** There used to be: a
+request from `127.0.0.1` was taken as the operator standing at the counter. Put
+a reverse proxy in front of that and every request in the world arrives from
+`127.0.0.1` — the test stops identifying anybody and starts admitting everybody.
+So the desk has a password:
+
+```bash
+./scripts/salon-secrets.sh operator
+```
+
+It is scrypt-hashed into `data/secrets/operator.hash` and exchanged for a signed,
+`HttpOnly` cookie — 12 hours absolute, 2 hours idle, and eight wrong guesses per
+address buys a 15-minute lockout. `host.token` still works as a `Bearer` header,
+which is how the seat, the print relay, and anything else without a browser
+authenticate.
+
+### Guest TLS
+
+**`static`.** The seat serves HTTPS on `:8787` with the salon CA. Its
+certificate lists the current LAN IPs in SAN so `https://<seat-ip>:8787`
+verifies. If DHCP moves the seat, re-run `./scripts/salon-tls.sh` (CA stays;
+seat cert is reissued). Safari/Chrome warn until the guest installs `ca.pem`
 (served at `/ca.pem`). The optional guest APK trusts
 `apps/guest/assets/ca.pem` (copied by that script). **Expo Go cannot trust a
 private CA** — use `cd apps/guest && npx expo run:android` if you still ship
 the APK.
+
+**`ondemand`.** Caddy holds a real wildcard certificate for `*.<domain>`, issued
+over DNS-01, and the seat speaks plain HTTP behind it. The guest installs
+nothing and no browser warns. One wildcard rather than on-demand issuance,
+because a certificate per visit walks into Let's Encrypt's rate limits on a busy
+Saturday. `/ca.pem` and the APK's bundled CA are legacy in this mode — the salon
+CA is down to one job, below.
+
+### The seat's own front door
+
+`BYOI_GUEST_NET` says what network a seat will answer on. `lan` (default) admits
+private addresses only, which is right when the seat is a PC in the room. `public`
+**removes** that check rather than leaving it to pass for everybody: behind a
+proxy the client address is the proxy's, so an address test there would look like
+a control while being none. What actually gates the chat is unchanged in both
+modes — the OTP, then the ticket, with the eight-failure lockout in
+`apps/seat/gate.py`. Both apps run with `--proxy-headers`, so that lockout counts
+the phone rather than the proxy.
+
+In `ondemand` the salon CA no longer holds guest TLS at all. It does one thing:
+prove the desk is the desk on `:8788`. Each seat gets **its own** key and a
+certificate naming its container, minted at check-in and destroyed with the
+visit.
 
 ## Claude login (seat PC, once)
 
@@ -73,6 +135,13 @@ markdown. `/export` is still the phone transcript.
 
 Without two credentialed dirs, a hard usage limit is an error on the phone —
 the visit is not moved to another chair.
+
+In `ondemand` the desk allocates accounts to a visit and bind-mounts **only those
+dirs** into the seat container. An account is never handed to two live seats at
+once — two Claude Code processes on one credential directory tread on each other,
+and it would also let one guest's session read the credentials another guest is
+sitting on. Run out of free accounts and check-in says so rather than
+double-booking one.
 
 **Known broken: the 80% early switch.** Measured against Claude Code 2.1.241,
 `statusLine` is **never invoked** under `-p --output-format stream-json`, which is
@@ -118,14 +187,21 @@ What this buys, and what it does not:
   revoked at checkout, not that it is weak. The phone names these powers before
   the guest approves, from the real `scope=` parameter rather than from what the
   seat asked for.
-* It lives on **tmpfs**, so it never reaches the SSD. Check
-  `swapon --show` is empty (or encrypted) or that guarantee is only partial —
-  the seat says so in the start response when it is not.
+* It lives on **tmpfs**, so it is never written to a filesystem. On a salon PC
+  that means it never reaches the SSD — check `swapon --show` is empty (or
+  encrypted) or the guarantee is only partial, and the seat says so in the start
+  response when it is not. **In the cloud say less than that.** The tmpfs is a
+  16 MB mount inside the seat container, so the token stays out of the container
+  filesystem and goes when the container does; what it is resident in is the
+  VM's RAM, which belongs to a hosting provider who can snapshot it. "Never
+  touches a disk we control" is true; "never touches a disk" is not.
 * Teardown **revokes** before it unlinks. Deleting `.credentials.json` alone
   would leave a live refresh token valid until `refreshTokenExpiresAt`.
 * It is **not** private from the operator during the visit. Claude Code runs on
   the seat, so root there can read the live token. The phone says this in as many
-  words before the guest signs in.
+  words before the guest signs in. In the cloud the same sentence covers one more
+  party: the seat is a container on a rented VM, so whoever runs that VM is
+  inside the trust boundary too.
 
 Freeing the seat also removes `data/handoffs/<session>.md`. The guest's project
 tree, its git history, and any `refs/byoi/` submission are left alone — those are
@@ -151,8 +227,11 @@ repo (override with `BYOI_WORKSPACE`). Extra trees: `BYOI_ADD_DIR=/path:/other`.
 
 ## Run
 
+### On a salon PC (`static`)
+
 ```bash
 ./scripts/salon-tls.sh
+./scripts/salon-secrets.sh operator
 ./scripts/run-salon.sh    # :8080  (reads data/tls/host.token)
 ./scripts/run-seat.sh     # :8787 guests + :8788 mTLS control
 ./scripts/wifi-status.sh
@@ -161,6 +240,34 @@ repo (override with `BYOI_WORKSPACE`). Extra trees: `BYOI_ADD_DIR=/path:/other`.
 Check-in **fails** if the seat control port does not accept the desk's client
 cert. Set `BYOI_SEAT_CONTROL_URL` to the seat's current IP when the machines
 are separate; you do not reissue certs when DHCP changes.
+
+### On a cloud VM (`ondemand`)
+
+One Linux VM with Docker. Point `<domain>` and `*.<domain>` at it first — the
+wildcard is issued over DNS-01, so Caddy also needs an API token for the zone.
+
+```bash
+cp deploy/.env.example deploy/.env     # domain, ACME email, DNS provider token
+./scripts/salon-secrets.sh operator    # the desk password
+./scripts/salon-secrets.sh print-relay # token for the machine with the printer
+./scripts/cloud-up.sh
+```
+
+That mints the salon CA if it is missing, builds the seat image, and brings up
+Caddy and the desk. Nothing else is long-running: seats appear at check-in.
+
+`BYOI_SEAT_CONTROL_URL` must be **unset** here. It pins every control call to one
+address, which is right with one seat agent and wrong with one per session.
+
+**The desk holds the Docker socket, and that is root on the VM.** It is the same
+trust level it already had for sandboxed grading, but the blast radius is larger
+now that it also raises seats. The desk never runs guest code, which is what
+makes this tolerable; if you want it smaller, put a socket proxy in front,
+restricted to what `apps/api/seats.py` and `apps/api/infra.py` actually call.
+
+Seats are RAM on this VM rather than PCs somebody already owns, so
+`BYOI_MAX_SEATS` caps how many can be up at once. Check-in past the cap is
+refused with that in the message.
 
 ## Projects on the solution board
 
@@ -266,12 +373,23 @@ The app only ever reads `DATABASE_URL`, `REDIS_URL`, and `AUTH_SECRET`:
 Nothing in the app branches on environment. The same code is developed, graded,
 and deployed.
 
-### On the seat
+### Where the stack runs
 
-Claiming a brief whose project needs infrastructure starts a per-session stack
-(`docker compose -p byoi-<session>`) with **ephemeral host ports**, so several
-seats on one PC never collide. Only the salon's own block of `.env.local` is
-rewritten — a guest's own variables survive. `docker compose down -v` runs when
+**`static`.** Claiming a brief whose project needs infrastructure starts a
+per-session stack on the seat (`docker compose -p byoi-<session>`) with
+**ephemeral host ports**, so several seats on one PC never collide.
+
+**`ondemand`.** The **desk** starts it, and the seat never sees Docker at all.
+This is not tidiness: the guest's Claude has Bash and inherits the seat's
+environment, so a Docker socket on the seat is root on the VM — the same
+reasoning that already keeps the Vercel token off it. The desk puts Postgres and
+Redis on a network only that one seat is attached to, and hands the seat the
+URLs over mTLS. They point at service names (`byoi-pg-<session>:5432`) rather
+than a scraped host port, so two seats are kept apart by being on different
+networks rather than by different port numbers.
+
+Either way the seat owns the file: only the salon's own block of `.env.local` is
+rewritten, so a guest's own variables survive. The stack and its volumes go when
 the host frees the seat.
 
 ### Deploying
@@ -323,6 +441,8 @@ load `.env`, and every seat path that spawns a process — the chat, the tmux
 session, the PTY side door — scrubs them first.
 
 ```bash
+./scripts/salon-secrets.sh operator     # the desk sign-in password
+./scripts/salon-secrets.sh print-relay  # generates a token for the counter
 ./scripts/salon-secrets.sh vercel     # prompts, writes data/secrets/vercel.token 0600
 ./scripts/salon-secrets.sh neon
 ./scripts/salon-secrets.sh upstash
@@ -331,6 +451,8 @@ session, the PTY side door — scrubs them first.
 
 | Credential | File | Effect if unset |
 |---|---|---|
+| operator password | `operator.hash` | Nobody can sign in to the desk |
+| `BYOI_PRINT_RELAY_TOKEN` | `print-relay.token` | The counter's printer agent cannot claim slips |
 | `BYOI_VERCEL_TOKEN` | `vercel.token` | Deploy is refused with a clear message |
 | `BYOI_VERCEL_SCOPE` | `vercel.scope` | Personal account is used |
 | `BYOI_NEON_API_KEY` | `neon.token` | Ships without a managed Postgres, and says so |
@@ -356,9 +478,16 @@ not run the desk on a shared login.
 
 ## Floor
 
-1. Host checks the coder in. Desk **POSTs the OTP to the seat over mTLS**,
-   then prints a slip. QR: `https://<seat-lan-ip>:8787/join?otp=<otp>`.
-2. Phone joins the same Wi-Fi as the seat PC.
+1. Host checks the coder in.
+   * `static` — the desk **POSTs the OTP to the seat over mTLS** and prints a
+     slip. QR: `https://<seat-lan-ip>:8787/join?otp=<otp>`.
+   * `ondemand` — the desk raises a seat container, mints its certificate,
+     publishes `s-<session>.<domain>` on the edge, waits for it to answer on its
+     control port, *then* pushes the OTP and queues the slip. The floor screen
+     says **Raising the seat…** while that happens. A QR is only ever shown for
+     an address that already answers.
+2. `static` only: the phone joins the same Wi-Fi as the seat PC. A cloud seat is
+   on the public internet — cellular is fine.
 3. Open the QR (or **BYOI Guest** → **Scan slip QR**). The seat serves an
    installable PWA at `/guest/`.
 4. Claim a brief, then **Open chat**. Seat checks OTP, issues a ticket for
@@ -367,6 +496,35 @@ not run the desk on a shared login.
    `/review`, `/model`, `/compact`, …), file mentions, photos, and stop.
 
 Add the PWA to the Home Screen for a full-screen chat next visit.
+
+Freeing the seat in `ondemand` destroys the container, its workspace volume, its
+edge route, its Postgres and Redis, and its certificate — after revoking the
+guest's own Claude token, so the refresh token does not outlive the tmpfs it sat
+on. Every step is best-effort and recorded: an operator with a guest standing
+there is never blocked by a container that will not die. A desk restart between
+a check-in and a checkout is reconciled at startup — a seat with no live session
+behind it is removed rather than left serving a guest who has gone home.
+
+## Printing, when the desk is not in the room
+
+The PeriPage speaks Bluetooth LE, which is a property of the room, so it stays at
+the counter. In `ondemand` the desk composes the slip and queues it; a small
+agent at the venue claims it and prints it through the same driver as always.
+
+```bash
+# on the machine with the printer, paired as usual
+export BYOI_DESK_URL=https://salon.example.com
+export BYOI_PRINT_RELAY_TOKEN=...        # from salon-secrets.sh print-relay
+export PERIPAGE_MAC=C6:6C:09:0B:B2:50
+./scripts/print-relay.py
+```
+
+It only makes outbound requests, so the counter can sit behind whatever NAT the
+cafe has. The floor screen shows the printer as ok, offline, or with a queue
+depth. **A check-in never waits on it**: the QR is on the desk screen either way,
+so an empty roll or a closed laptop delays a piece of paper, not a visit. A claim
+that is never finished is handed out again after two minutes — reprinting a slip
+is cheap, never printing one is not.
 
 ## Optional SSH / TTY
 
@@ -377,3 +535,47 @@ path and SSH is **not** OTP-gated.
 sudo ./scripts/seat-guest-ssh.sh
 ssh guest@<seat-lan-ip>
 ```
+
+`static` only. A cloud seat runs no sshd and is not published on port 22, and
+an un-gated shell should not be reachable from the internet in the first place.
+Use `docker exec -it byoi-seat-<session> bash` from the VM instead, which needs
+an account on the VM — which the guest does not have.
+
+## Environment
+
+Everything new to running in the cloud, in one place. Defaults are the salon-PC
+behaviour, so an existing checkout keeps working untouched.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `BYOI_SEATS` | `static` | `ondemand` makes the desk raise a seat container per visit |
+| `BYOI_GUEST_NET` | `lan` | `public` drops the seat's private-address check (OTP still gates) |
+| `BYOI_GUEST_TLS` | `1` | `0` when something in front terminates guest TLS |
+| `BYOI_DOMAIN` | — | Seats are published at `s-<session>.<domain>` |
+| `BYOI_PUBLIC_BASE` | — | Where the desk itself is reachable |
+| `BYOI_CADDY_ADMIN` | — | Caddy's admin socket. Unset means no edge to publish on |
+| `BYOI_SEAT_IMAGE` | `byoi-seat:latest` | Image a seat container is raised from |
+| `BYOI_MAX_SEATS` | `4` | Concurrent seats; check-in past it is refused |
+| `BYOI_SEAT_MEMORY` / `_CPUS` / `_PIDS` | `4g` / `2` / `1024` | Per-seat caps |
+| `BYOI_SEAT_READY_TIMEOUT` | `120` | Seconds to wait for a new seat's control port |
+| `BYOI_HOST_DATA_DIR` | — | Where `data/` lives on the VM, for bind mounts |
+| `BYOI_EDGE_NETWORK` / `BYOI_CONTROL_NETWORK` | `byoi-edge` / `byoi-ctl` | Docker networks |
+| `BYOI_PRINT_MODE` | `local` | `relay` queues slips for the venue's printer agent |
+| `BYOI_OPERATOR_TTL` / `BYOI_OPERATOR_IDLE` | `43200` / `7200` | Desk session lifetime, in seconds |
+| `BYOI_COOKIE_SECURE` | `1` | `0` only where the desk is served over plain HTTP |
+
+## What did not change
+
+Worth stating, because a migration invites the assumption that it did:
+
+* **The 80% early switch is still broken.** Nothing here touches it — see the
+  note under *Claude login*. A real usage limit still switches accounts; the
+  early, graceful one still never fires.
+* **The QR geometry is untouched.** `render_qr` picks a whole number of pixels
+  per module for a reason, and `scripts/qr-scan-report.py` still asserts it.
+* **Grading is unchanged.** It always ran on the desk, in Docker, with
+  `--network none` and a scrubbed environment. It now happens to sit next to the
+  provisioning driver.
+* **The URL contract is unchanged.** The app still reads `DATABASE_URL`,
+  `REDIS_URL`, and `AUTH_SECRET`, and still branches on nothing. Only who starts
+  the containers moved.

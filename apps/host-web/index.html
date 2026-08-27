@@ -21,6 +21,7 @@
       <button type="button" class="tab" data-pane="live">Live</button>
     </nav>
     <button type="button" class="cta" id="openSit">Sit a guest</button>
+    <button type="button" class="text" id="signOut">Sign out</button>
   </header>
 
   <main class="dash">
@@ -115,11 +116,23 @@
     </div>
   </aside>
 
+  <div id="signin" class="signin" hidden>
+    <form id="signinForm" class="signin-card">
+      <h1>Salon desk</h1>
+      <p class="quiet" id="signinHint">Sign in to open the floor.</p>
+      <input type="password" name="password" id="signinPw" placeholder="Operator password"
+             autocomplete="current-password" required />
+      <button type="submit">Sign in</button>
+      <p id="signinMsg" class="quiet" role="alert"></p>
+    </form>
+  </div>
+
   <footer class="health">
     <span>Floor</span>
     <div class="bar"><i id="healthBar"></i></div>
     <span id="healthDesk">Desk</span>
     <span id="healthSeats">Seats</span>
+    <span id="healthPrinter" class="pill">Printer</span>
   </footer>
   <script src="/host/assets/host.js"></script>
 </body>

@@ -6,7 +6,7 @@ from apps.api.main import create_app
 
 
 def _desk(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    return TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
 
 
 def _session_with_project(desk: TestClient, tmp_path: Path, *, spec: str = "") -> tuple[str, dict]:

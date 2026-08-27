@@ -85,35 +85,69 @@ def local_ipv4s() -> list[str]:
     return sorted(ips)
 
 
-def seat_san_line() -> str:
-    names = [f"DNS:{SEAT_SERVER_NAME}", "DNS:localhost"]
-    names.extend(f"IP:{ip}" for ip in local_ipv4s())
+def guest_tls_is_ours() -> bool:
+    """True when the seat terminates guest HTTPS itself.
+
+    On a salon PC it does, so the certificate has to carry the seat's current
+    LAN IPs — that is the address the phone opens. In the cloud Caddy holds a
+    real certificate for a real name and the seat only speaks TLS on its control
+    port, where the address is irrelevant.
+    """
+    return os.environ.get("BYOI_GUEST_TLS", "1") != "0"
+
+
+def seat_san_line(
+    name: str = SEAT_SERVER_NAME,
+    *,
+    extra_dns: tuple[str, ...] = (),
+    with_ips: bool | None = None,
+) -> str:
+    names = [f"DNS:{name}", "DNS:localhost", *(f"DNS:{d}" for d in extra_dns)]
+    if guest_tls_is_ours() if with_ips is None else with_ips:
+        names.extend(f"IP:{ip}" for ip in local_ipv4s())
     return "subjectAltName=" + ",".join(names)
 
 
-def issue_seat_cert(p: TlsPaths) -> None:
-    """Re-sign the seat server cert with current LAN IPs so phones can use https://<ip>."""
-    dest = p.root
+def issue_seat_cert(
+    ca: TlsPaths,
+    out: TlsPaths | None = None,
+    *,
+    name: str = SEAT_SERVER_NAME,
+    extra_dns: tuple[str, ...] = (),
+    with_ips: bool | None = None,
+) -> TlsPaths:
+    """Sign a seat server certificate with ``ca``, writing it into ``out``.
+
+    ``out`` defaults to the CA's own directory, which is the single-seat salon
+    PC case. The cloud passes a per-session directory instead, so each seat
+    container gets its own key and the desk can hand it exactly one identity.
+    """
+    out = out or ca
+    dest = out.root
     dest.mkdir(parents=True, exist_ok=True)
-    if not p.seat_key.is_file():
-        _openssl("genrsa", "-out", str(p.seat_key), "2048")
-        os.chmod(p.seat_key, 0o600)
+    if not out.seat_key.is_file():
+        _openssl("genrsa", "-out", str(out.seat_key), "2048")
+        os.chmod(out.seat_key, 0o600)
     ext = dest / "seat.ext"
     ext.write_text(
         "basicConstraints=CA:FALSE\n"
         "keyUsage=digitalSignature,keyEncipherment\n"
         "extendedKeyUsage=serverAuth\n"
-        + seat_san_line()
+        + seat_san_line(name, extra_dns=extra_dns, with_ips=with_ips)
         + "\n"
     )
-    _openssl("req", "-new", "-key", str(p.seat_key), "-out", str(dest / "seat.csr"),
-             "-subj", f"/CN={SEAT_SERVER_NAME}")
-    _openssl("x509", "-req", "-in", str(dest / "seat.csr"), "-CA", str(p.ca),
-             "-CAkey", str(p.ca_key), "-CAcreateserial", "-out", str(p.seat_cert),
+    _openssl("req", "-new", "-key", str(out.seat_key), "-out", str(dest / "seat.csr"),
+             "-subj", f"/CN={name}")
+    _openssl("x509", "-req", "-in", str(dest / "seat.csr"), "-CA", str(ca.ca),
+             "-CAkey", str(ca.ca_key), "-CAcreateserial", "-out", str(out.seat_cert),
              "-days", "825", "-sha256", "-extfile", str(ext))
+    if out.root != ca.root and not out.ca.is_file():
+        out.ca.write_bytes(ca.ca.read_bytes())
     (dest / "seat.csr").unlink(missing_ok=True)
     ext.unlink(missing_ok=True)
     (dest / "ca.srl").unlink(missing_ok=True)
+    (ca.root / "ca.srl").unlink(missing_ok=True)
+    return out
 
 
 def copy_ca_to_guest(p: TlsPaths | None = None) -> Path | None:

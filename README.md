@@ -110,9 +110,14 @@ pytest
 
 ## Salon (coding + wellness)
 
-Cafe floor: a **desk** checks guests in and prints a slip, a **seat PC** runs
-Claude Code, and the **guest phone** is a chat PWA (not a terminal). Same
-Wi-Fi. Guests never log into Claude. Full notes: [`docs/salon.md`](docs/salon.md).
+Cafe floor: a **desk** checks guests in and prints a slip, a **seat** runs
+Claude Code, and the **guest phone** is a chat PWA (not a terminal). Guests never
+log into Claude. Full notes: [`docs/salon.md`](docs/salon.md).
+
+It runs two ways. On **one salon PC**, seats are that PC and the phone is on its
+Wi-Fi. On **a cloud VM**, the desk raises a seat container per visit at
+`https://s-<session>.<domain>` with a real certificate, the phone can be on
+cellular, and the thermal printer stays at the counter behind a small relay.
 
 ```
 Desk  :8080   check-in, floor, solution board
@@ -121,14 +126,33 @@ Seat  :8787   HTTPS guest PWA for phones
 Seat  :8788   mTLS control (desk → seat)
 ```
 
+On one PC:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[salon,dev]"
 ./scripts/salon-tls.sh
+./scripts/salon-secrets.sh operator                      # desk sign-in password
 ./scripts/seat-claude-login.sh --account claude-seat-1   # then: claude setup-token
 ./scripts/run-salon.sh           # desk
 ./scripts/run-seat.sh            # seat UI + guest PWA
+```
+
+In the cloud — one Linux VM with Docker, with `<domain>` and `*.<domain>`
+pointed at it:
+
+```bash
+cp deploy/.env.example deploy/.env     # domain, ACME email, DNS provider token
+./scripts/salon-secrets.sh operator
+./scripts/salon-secrets.sh print-relay
+./scripts/cloud-up.sh                  # Caddy + desk; seats appear at check-in
+```
+
+Then, on the machine with the printer:
+
+```bash
+BYOI_DESK_URL=https://<domain> PERIPAGE_MAC=… ./scripts/print-relay.py
 ```
 
 | Open on this PC | URL |
@@ -137,15 +161,19 @@ pip install -e ".[salon,dev]"
 | Seat | http://127.0.0.1:8786/ |
 | Guest (phone) | `https://<seat-lan-ip>:8787/guest/` |
 
-Desk check-in is allowed from **127.0.0.1** on this machine (no token paste).
-Phones cannot use the desk page. The slip QR is `https://<seat-ip>:8787/join?otp=…`.
+The desk asks for the operator password — there is no same-machine shortcut, in
+either mode. Behind a reverse proxy every request looks like it came from
+`127.0.0.1`, so trusting that would open the floor to the internet rather than to
+the counter. The slip QR is `https://<seat-ip>:8787/join?otp=…` on a salon PC and
+`https://s-<session>.<domain>/join?otp=…` in the cloud.
 
 **Floor / Solutions / Live.** Desk tabs: seats, the solution board, and a
 mirror of the guest session. **Sit a guest** opens a centered QR — the
 image is the join code only; the printer still gets the full thermal slip.
-On the phone: same Wi-Fi, scan, pick a solution, **Chat**. Claude Code runs
-on the seat; the phone is messages, tools, diffs, files, photos, plan/code
-modes, and a session timer.
+On the phone: scan, pick a solution, **Chat** — on the seat's Wi-Fi if the seat
+is this PC, from anywhere if it is a cloud container. Claude Code runs on the
+seat; the phone is messages, tools, diffs, files, photos, plan/code modes, and a
+session timer.
 
 **Your own Claude account.** A guest who already pays for Claude can tap **Use my
 own Claude account** and run the session on theirs. They sign in on their own
@@ -160,8 +188,9 @@ An optional **acceptance spec** runs when the guest taps **I'm done** — the
 seat grades the work and the phone shows pass/fail.
 
 `gh auth login` once if you create GitHub repos from the desk. New clones
-land in `data/projects/`. Phone browsers warn on the salon CA until
-`https://<seat-ip>:8787/ca.pem` is installed.
+land in `data/projects/`. On a salon PC, phone browsers warn on the salon CA
+until `https://<seat-ip>:8787/ca.pem` is installed; in the cloud the certificate
+is a real one and there is nothing to install.
 
 ## What this is not
 

@@ -25,6 +25,8 @@ from .tmux_claude import SESSION, ensure_session
 
 TRANSPORT = os.environ.get("BYOI_TRANSPORT", "wifi")
 LAN_CIDR = os.environ.get("BYOI_LAN_CIDR", "")
+# "lan" on a salon PC, "public" for a seat container behind the cloud proxy.
+GUEST_NET = os.environ.get("BYOI_GUEST_NET", "lan")
 SEAT_ID = os.environ.get("BYOI_SEAT_ID", "seat-1")
 SEAT_NAME = os.environ.get("BYOI_SEAT_NAME", "Seat 1")
 HOUSE = os.environ.get("BYOI_HOUSE_URL", "http://127.0.0.1:8080")
@@ -47,8 +49,25 @@ def lan_ip() -> str:
         return "127.0.0.1"
 
 
-def client_allowed(host: str | None, *, lan_cidr: str = LAN_CIDR) -> bool:
-    """True for the seat itself and phones on the same private Wi-Fi."""
+def guest_net() -> str:
+    return os.environ.get("BYOI_GUEST_NET", GUEST_NET).strip().lower() or "lan"
+
+
+def client_allowed(host: str | None, *, lan_cidr: str = LAN_CIDR, mode: str | None = None) -> bool:
+    """Whether the network the request arrived over is one we admit at all.
+
+    ``lan`` — the seat is a PC in the room and the guest's phone is on its
+    Wi-Fi, so a public source address is somebody who should not be here.
+
+    ``public`` — the seat is a container behind a reverse proxy and guests
+    arrive from anywhere, so this check is *removed* rather than left to pass
+    for everyone. Reaching the chat still needs the OTP and then the ticket,
+    which is where the security has always actually been (`gate.py`, including
+    its lockout). Leaving an address test in place here would look like a
+    control while admitting the whole internet.
+    """
+    if (mode or guest_net()) == "public":
+        return True
     if not host:
         return False
     if host in {"testclient", "localhost", "localhost.localdomain"}:
@@ -66,6 +85,11 @@ def client_allowed(host: str | None, *, lan_cidr: str = LAN_CIDR) -> bool:
         except ValueError:
             return False
     return bool(ip.is_private or ip.is_link_local)
+
+
+def wrong_network() -> str:
+    """What to tell a guest whose request came from somewhere we do not admit."""
+    return "join the same Wi-Fi as this seat first"
 
 
 def _want_rfcomm() -> bool:
@@ -183,7 +207,8 @@ def status() -> dict:
         **gate.snapshot(),
         "ssh": _ssh_hint(),
         "lan": lan_ip(),
-        "wifi": True,
+        "guest_net": guest_net(),
+        "wifi": guest_net() == "lan",
         "otp_gate": True,
         "guest": "/guest/",
         "workspace": str(chat_session.workspace_path or default_workspace()),
@@ -205,7 +230,7 @@ class UnlockIn(BaseModel):
 def unlock(request: Request, body: UnlockIn | None = None) -> dict:
     host = _request_host(request)
     if not client_allowed(host) and not UNLOCK_OPEN:
-        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+        raise HTTPException(403, wrong_network())
     presented = body.otp if body else None
     try:
         ticket = gate.unlock(presented, open_gate=UNLOCK_OPEN)
@@ -249,7 +274,7 @@ def _require_ticket(ticket: str | None) -> None:
 @app.get("/local/handoff")
 def guest_handoff(request: Request, ticket: str) -> Response:
     if not client_allowed(_request_host(request)) and not UNLOCK_OPEN:
-        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+        raise HTTPException(403, wrong_network())
     _require_ticket(ticket)
     from .accounts import read_handoff
 
@@ -270,7 +295,7 @@ def _guest_session_id() -> str | None:
 
 def _byo_guard(request: Request, body: ByoIn | None) -> str | None:
     if not client_allowed(_request_host(request)) and not UNLOCK_OPEN:
-        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+        raise HTTPException(403, wrong_network())
     _require_ticket(body.ticket if body else None)
     return _guest_session_id()
 
@@ -339,7 +364,7 @@ async def byo_cancel(request: Request, body: ByoIn | None = None) -> dict:
 @app.get("/local/workspace")
 def workspace_listing(request: Request, ticket: str, path: str = "") -> dict:
     if not client_allowed(_request_host(request)) and not UNLOCK_OPEN:
-        raise HTTPException(403, "join the same Wi-Fi as this seat first")
+        raise HTTPException(403, wrong_network())
     _require_ticket(ticket)
     try:
         return list_workspace(path)

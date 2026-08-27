@@ -261,3 +261,28 @@ def test_submit_kind_selects_the_deploy_ref(tmp_path, monkeypatch):
         headers={"Authorization": "Bearer byoi-host"},
     )
     assert res.json()["ref"] == "refs/byoi/deploys/sid1"
+
+
+@pytest.mark.skipif(os.system("command -v openssl >/dev/null") != 0, reason="openssl required")
+def test_cloud_seat_cert_carries_a_name_not_an_address(tmp_path, monkeypatch):
+    """In the cloud the seat only speaks TLS to the desk, on a container name.
+
+    Baking LAN IPs in would mean reissuing whenever an address moved — the very
+    thing the salon had to do on cafe DHCP.
+    """
+    import subprocess
+
+    from apps.tls import TlsPaths, issue_seat_cert
+
+    monkeypatch.setenv("BYOI_TLS_DIR", str(tmp_path))
+    monkeypatch.setenv("BYOI_GUEST_TLS", "0")
+    ca = generate(tmp_path)
+    out = issue_seat_cert(ca, TlsPaths(tmp_path / "seats" / "abc123"), name="byoi-seat-abc123")
+    text = subprocess.check_output(
+        ["openssl", "x509", "-in", str(out.seat_cert), "-noout", "-text"], text=True
+    )
+    assert "DNS:byoi-seat-abc123" in text
+    assert "IP Address" not in text
+    assert out.seat_key.is_file() and out.ca.is_file()
+    # The per-seat key is its own, not a copy of the salon PC's.
+    assert out.seat_key.read_bytes() != ca.seat_key.read_bytes()

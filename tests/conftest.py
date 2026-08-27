@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from apps.api.seat_sync import SeatSyncError
@@ -75,3 +77,22 @@ def _isolate_host_token(monkeypatch):
 def _isolate_claude_accounts(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path_factory.mktemp("claude-accounts")))
     monkeypatch.setenv("BYOI_HANDOFFS_DIR", str(tmp_path_factory.mktemp("handoffs")))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker(tmp_path_factory, monkeypatch):
+    """No test may drive the machine's real Docker.
+
+    Provisioning and grading both shell out to `docker`, and a test that
+    reaches the host daemon can pull images, start containers, and leave them
+    running. Tests that need one provide their own fake earlier on PATH.
+    """
+    blocker = tmp_path_factory.mktemp("no-docker")
+    stub = blocker / "docker"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "refusing to reach the real docker daemon from a test" >&2\n'
+        "exit 127\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{blocker}:{os.environ['PATH']}")

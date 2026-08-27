@@ -1,0 +1,39 @@
+# A seat. This is the only container that runs guest code, so it gets none of
+# the desk's credentials and — deliberately — no Docker socket and no Docker
+# client. Its Postgres and Redis are raised for it by the desk.
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git openssl ca-certificates curl gnupg tmux openssh-client procps \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+
+WORKDIR /app
+# README.md is not documentation here: pyproject's `readme` field points at
+# it, so an editable install without it fails.
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir -e ".[salon]"
+COPY apps ./apps
+COPY scripts ./scripts
+
+ENV PYTHONPATH=/app:/app/src \
+    BYOI_GUEST_TLS=0 \
+    BYOI_GUEST_NET=public \
+    BYOI_TRANSPORT=wifi \
+    BYOI_GUEST_RUNTIME_DIR=/run/byoi
+
+COPY deploy/seat-entrypoint.sh /usr/local/bin/seat-entrypoint
+RUN chmod +x /usr/local/bin/seat-entrypoint
+
+EXPOSE 8787 8788
+ENTRYPOINT ["/usr/local/bin/seat-entrypoint"]

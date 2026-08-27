@@ -1,0 +1,11 @@
+# Caddy with a DNS provider plugin, which the wildcard certificate needs.
+# BYOI_DNS_PROVIDER in .env must match the module built in here.
+ARG CADDY_VERSION=2.8
+FROM caddy:${CADDY_VERSION}-builder AS builder
+ARG DNS_PLUGIN=github.com/caddy-dns/cloudflare
+RUN xcaddy build \
+    --with ${DNS_PLUGIN} \
+    --with github.com/mholt/caddy-ratelimit
+
+FROM caddy:${CADDY_VERSION}
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

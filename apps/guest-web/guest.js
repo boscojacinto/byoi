@@ -36,7 +36,11 @@ const state = {
   otp: params.get("otp") || "",
   ticket: params.get("ticket") || "",
   join: null,
-  status: "Same Wi-Fi as the seat PC. Open the slip QR, or paste the join URL.",
+  status: "Open the slip QR, or paste the join URL.",
+  // The seat tells us at boot whether it is a PC in this room, in which
+  // case the guest does have to be on its Wi-Fi, or a cloud container,
+  // where saying so would send them hunting for a password they do not need.
+  onWifi: false,
   busy: false,
   messages: [],
   chatBusy: false,
@@ -775,7 +779,7 @@ function joinHTML() {
   return `<div class="screen">
     <p class="eyebrow">BYOI</p>
     <h1>Have a seat</h1>
-    <p class="lede">Same Wi-Fi as this table. Scan the slip, or type the code.</p>
+    <p class="lede">${state.onWifi ? "Same Wi-Fi as this table. " : ""}Scan the slip, or type the code.</p>
     <div class="card">
       <label for="otp">Code from the slip</label>
       <input id="otp" type="text" inputmode="text" autocomplete="one-time-code" value="${escapeHtml(state.otp)}" placeholder="on the printed slip" />
@@ -1407,7 +1411,22 @@ function fitViewport() {
   if (state.view === "chat") scrollLog();
 }
 
+async function seatNetwork() {
+  try {
+    const res = await fetch("/local/status");
+    if (!res.ok) return;
+    const status = await res.json();
+    state.onWifi = status.guest_net !== "public";
+    if (state.onWifi && state.status.startsWith("Open the slip")) {
+      state.status = "Same Wi-Fi as the seat PC. " + state.status;
+    }
+  } catch (err) {
+    // Not knowing is fine: the neutral copy is true either way.
+  }
+}
+
 async function boot() {
+  await seatNetwork();
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/guest/sw.js", { scope: "/guest/" }).catch(() => {});
   }
