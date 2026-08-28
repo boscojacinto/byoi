@@ -31,6 +31,9 @@ log = logging.getLogger("uvicorn.error")
 ROOT = Path(__file__).resolve().parents[2]
 GUEST_PORT = 8787
 CONTROL_PORT = 8788
+# Where a seat container sees its own tree. The desk sees the same bytes under
+# runtime_dir(session)/workspace.
+GUEST_WORKSPACE = "/app/data/workspace"
 READY_TIMEOUT = float(os.environ.get("BYOI_SEAT_READY_TIMEOUT", "120"))
 READY_POLL_S = 1.0
 
@@ -79,6 +82,80 @@ def runtime_dir(session_id: str) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     os.chmod(dest, 0o700)
     return dest.resolve()
+
+
+def workspace_dir(session_id: str) -> Path:
+    """This visit's tree, as a directory on the VM rather than a named volume.
+
+    A bind mount because the desk has to be able to *read* what the seat wrote.
+    Grading fetches the submission ref straight out of here, which is what lets
+    the cloud keep the one-PC path: no asking the guest's seat to push its work
+    through the project's origin, and so no git credentials on the seat.
+
+    It lives under runtime_dir(), so freeing the seat already removes it.
+    """
+    dest = runtime_dir(session_id) / "workspace"
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest.resolve()
+
+
+def seed_workspace(session_id: str, project_path: str | Path) -> str:
+    """Put a board project inside this visit's workspace; return the seat's path.
+
+    The project folder itself is never mounted into a seat. One guest would then
+    be able to read and rewrite another's work — the same reason a visit only
+    ever receives the Claude accounts allocated to it.
+    """
+    src = Path(project_path)
+    if not src.is_dir():
+        raise SeatError(f"the project folder is missing: {src}")
+    dest = workspace_dir(session_id) / src.name
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+
+    if (src / ".git").is_dir():
+        if not shutil.which("git"):
+            raise SeatError("git is not on PATH — the desk cannot seed a workspace")
+        res = subprocess.run(
+            ["git", "clone", str(src), str(dest)],
+            capture_output=True,
+            text=True,
+            timeout=float(os.environ.get("BYOI_SEED_TIMEOUT", "300")),
+        )
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout).strip()[:400]
+            raise SeatError(f"cloning {src.name} for the seat failed: {detail}")
+        # The clone's origin would otherwise be a path that exists only in the
+        # desk container, so a guest running `git push` would get a confusing
+        # failure. Point it at whatever the project itself calls origin.
+        upstream = subprocess.run(
+            ["git", "-C", str(src), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+        )
+        url = upstream.stdout.strip() if upstream.returncode == 0 else ""
+        subprocess.run(
+            ["git", "-C", str(dest), "remote", "set-url", "origin", url] if url
+            else ["git", "-C", str(dest), "remote", "remove", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+        )
+    else:
+        # `local` projects can be any folder. Copy it so the guest still gets the
+        # code; submission will report it is not a repo, exactly as it does today.
+        shutil.copytree(src, dest, symlinks=True)
+
+    return f"{GUEST_WORKSPACE}/{src.name}"
+
+
+def workspace_source(session_id: str, project_path: str | None) -> Path | None:
+    """Where the desk can read the tree the seat has been working in."""
+    if not project_path:
+        return None
+    dest = workspace_dir(session_id) / Path(project_path).name
+    return dest if (dest / ".git").is_dir() else None
 
 
 def host_path(inside: Path) -> Path:
@@ -180,7 +257,7 @@ def _run_args(session_id: str, *, tls_dir: Path, labels: list[str], seat: dict[s
         "--pids-limit", os.environ.get("BYOI_SEAT_PIDS", "1024"),
         "--security-opt", "no-new-privileges",
         "-v", f"{host_path(tls_dir)}:/app/data/tls:ro",
-        "-v", f"byoi-workspace-{session_id}:/app/data/workspace",
+        "-v", f"{host_path(workspace_dir(session_id))}:{GUEST_WORKSPACE}",
         "-e", f"BYOI_SEAT_ID={seat.get('id', 'seat-1')}",
         "-e", f"BYOI_SEAT_NAME={seat.get('name', 'Seat')}",
         "-e", f"BYOI_SESSION_ID={session_id}",
@@ -300,7 +377,8 @@ def teardown(store: Any, session: dict[str, Any], seat: dict[str, Any]) -> dict[
         ("route", lambda: caddy.unpublish(session_id)),
         ("infra", lambda: desk_infra.down(session_id)),
         ("container", lambda: _docker("rm", "-f", name, timeout=60.0)),
-        ("workspace", lambda: _docker("volume", "rm", "-f", f"byoi-workspace-{session_id}", timeout=30.0)),
+        # Takes the guest's workspace with it: it is a directory in here, not a
+        # named volume that would outlive the visit unless something removed it.
         ("identity", lambda: shutil.rmtree(runtime_dir(session_id), ignore_errors=True)),
     ):
         try:
@@ -337,7 +415,6 @@ def reconcile(store: Any) -> dict[str, Any]:
         if session_id not in live:
             stray.append(session_id)
             _docker("rm", "-f", name, timeout=60.0)
-            _docker("volume", "rm", "-f", f"byoi-workspace-{session_id}", timeout=30.0)
             shutil.rmtree(runtime_dir(session_id), ignore_errors=True)
     try:
         for session_id in caddy.published():

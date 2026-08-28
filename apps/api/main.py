@@ -476,8 +476,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         needs: list[str] = []
         if path:
             seat = store.seat(sess["seat_id"])
+            # On one PC the seat can just open the project folder. A seat
+            # container cannot: the folder is not mounted into it, and mounting
+            # the whole projects root would hand every guest every other guest's
+            # work. So the project is cloned into this visit's own workspace.
+            target = path
+            if on_demand_seats():
+                try:
+                    target = seats.seed_workspace(session_id, path)
+                except seats.SeatError as exc:
+                    raise HTTPException(502, f"could not put this project on the seat: {exc}") from exc
             try:
-                seat_sync.set_workspace(seat, path)
+                seat_sync.set_workspace(seat, target)
             except SeatSyncError as exc:
                 raise HTTPException(502, "seat did not switch to this project's folder") from exc
             detected = project_ops.detect(path)
@@ -485,7 +495,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if project and detected.get("framework"):
                 store.set_project_framework(project["id"], detected["framework"])
             if needs:
-                background_tasks.add_task(_infra_job, session_id, seat, path)
+                background_tasks.add_task(_infra_job, session_id, seat, target)
         return {"session": sess, "item": item, "project": project, "infra": needs}
 
     def _teardown_deployment(session_id: str | None) -> None:
@@ -546,15 +556,27 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         session_id: str, seat: dict | None, *, spec: str, title: str, cwd: str | None
     ) -> dict:
         """Seat pins the tree to a git ref; the host generates, runs, and grades."""
-        local_ok = bool(cwd) and Path(cwd).is_dir()
-        info = seat_sync.submit_solution(
-            seat, session_id=session_id, cwd=cwd, push=not local_ok
-        )
+        if on_demand_seats():
+            # `cwd` is a desk path; the seat has its own. Sending None lets the
+            # seat answer with the workspace it was given at claim time, and the
+            # desk reads the pinned ref back out of the same bind mount rather
+            # than making the seat push it anywhere.
+            host_src = seats.workspace_source(session_id, cwd)
+            local_ok = host_src is not None
+            info = seat_sync.submit_solution(
+                seat, session_id=session_id, cwd=None, push=not local_ok
+            )
+            source = str(host_src) if local_ok else info.get("remote")
+        else:
+            local_ok = bool(cwd) and Path(cwd).is_dir()
+            info = seat_sync.submit_solution(
+                seat, session_id=session_id, cwd=cwd, push=not local_ok
+            )
+            # One PC: fetch straight off the seat's repo. Two: the seat pushed it.
+            source = info.get("toplevel") if local_ok else info.get("remote")
         ref = info.get("ref")
         if not ref:
             raise TestgenError("the seat did not pin a submission ref")
-        # One PC: fetch straight off the seat's repo. Two PCs: the seat pushed it.
-        source = info.get("toplevel") if local_ok else info.get("remote")
         if not source:
             raise TestgenError("no reachable source for the submission")
         return testgen.run(

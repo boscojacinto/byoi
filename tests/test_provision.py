@@ -7,6 +7,7 @@ is the whole reason provisioning lives on the desk.
 
 import json
 import os
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -281,11 +282,16 @@ def test_teardown_removes_everything_the_visit_made(
     sess = store.check_in("seat-1", "Ada")
     seats.provision(store, sess, store.seat("seat-1"))
 
+    # The guest's tree is a directory on the VM, not a named volume, so what
+    # proves it is gone is the directory rather than a `docker volume rm`.
+    workspace = seats.workspace_dir(sess["id"])
+    (workspace / "scratch.txt").write_text("guest work")
+
     result = seats.teardown(store, sess, store.seat("seat-1"))
     assert result["ok"], result["problems"]
     log = fake_docker.read_text()
     assert f"rm -f byoi-seat-{sess['id']}" in log
-    assert f"volume rm -f byoi-workspace-{sess['id']}" in log
+    assert not workspace.exists()
     assert not caddy_admin["routes"]
     assert store.seat("seat-1")["state"] == "idle"
     assert store.session(sess["id"])["account_labels"] == []
@@ -382,3 +388,161 @@ def test_the_poll_address_carries_the_join_url_once_ready(tmp_path, monkeypatch)
     state = client.get(f"/api/sessions/{sid}/seat").json()
     assert state["state"] == "ready"
     assert state["join"] == f"https://s-{sid}.salon.example/join?otp={state['otp']}"
+
+
+# --- the guest's tree -------------------------------------------------------
+
+
+def _repo(root: Path, name: str, *, origin: str | None = None) -> Path:
+    """A real git project of the shape the board hands out."""
+    path = root / name
+    path.mkdir(parents=True)
+    (path / "README.md").write_text(f"# {name}\n")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "first"],
+        cwd=path,
+        check=True,
+    )
+    if origin:
+        subprocess.run(["git", "remote", "add", "origin", origin], cwd=path, check=True)
+    return path
+
+
+def test_the_seat_gets_its_own_workspace_not_the_projects_root(
+    tmp_path, fake_docker, caddy_admin, ready_seat
+):
+    """Mounting the projects root would hand each guest every other guest's work."""
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    seats.provision(store, sess, store.seat("seat-1"))
+
+    log = fake_docker.read_text()
+    assert f"{seats.workspace_dir(sess['id'])}:{seats.GUEST_WORKSPACE}" in log
+    assert "projects" not in log
+
+
+def test_seed_workspace_clones_the_project_and_leaves_it_alone(tmp_path, fake_docker):
+    project = _repo(tmp_path / "projects", "todo-api")
+    seat_path = seats.seed_workspace("sess-1", project)
+
+    assert seat_path == f"{seats.GUEST_WORKSPACE}/todo-api"
+    clone = seats.workspace_dir("sess-1") / "todo-api"
+    assert (clone / ".git").is_dir()
+    assert (clone / "README.md").read_text() == "# todo-api\n"
+    # The board's copy is the thing every later visit is cut from.
+    assert not (project / "guest-scratch").exists()
+
+
+def test_two_visits_never_share_a_workspace(tmp_path, fake_docker):
+    project = _repo(tmp_path / "projects", "todo-api")
+    seats.seed_workspace("sess-1", project)
+    seats.seed_workspace("sess-2", project)
+
+    one = seats.workspace_dir("sess-1") / "todo-api"
+    two = seats.workspace_dir("sess-2") / "todo-api"
+    assert one != two
+    (one / "mine.txt").write_text("ada")
+    assert not (two / "mine.txt").exists()
+
+
+def test_the_clone_points_at_the_real_origin(tmp_path, fake_docker):
+    """A guest's `git push` must not aim at a path only the desk container has."""
+    project = _repo(tmp_path / "projects", "todo-api", origin="https://example.com/x.git")
+    seats.seed_workspace("sess-1", project)
+
+    clone = seats.workspace_dir("sess-1") / "todo-api"
+    url = subprocess.run(
+        ["git", "-C", str(clone), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+    )
+    assert url.stdout.strip() == "https://example.com/x.git"
+
+
+def test_a_project_that_is_not_a_repo_still_reaches_the_guest(tmp_path, fake_docker):
+    """`local` projects are any folder somebody pointed the desk at."""
+    plain = tmp_path / "projects" / "sketch"
+    plain.mkdir(parents=True)
+    (plain / "index.html").write_text("<h1>hi</h1>")
+
+    seats.seed_workspace("sess-1", plain)
+    clone = seats.workspace_dir("sess-1") / "sketch"
+    assert (clone / "index.html").read_text() == "<h1>hi</h1>"
+    assert seats.workspace_source("sess-1", str(plain)) is None
+
+
+def test_seed_workspace_reports_a_missing_project(tmp_path, fake_docker):
+    with pytest.raises(seats.SeatError) as err:
+        seats.seed_workspace("sess-1", tmp_path / "nope")
+    assert "missing" in str(err.value)
+
+
+def test_workspace_source_is_what_the_desk_grades_from(tmp_path, fake_docker):
+    project = _repo(tmp_path / "projects", "todo-api")
+    seats.seed_workspace("sess-1", project)
+
+    src = seats.workspace_source("sess-1", str(project))
+    assert src == seats.workspace_dir("sess-1") / "todo-api"
+    assert seats.workspace_source("sess-1", None) is None
+
+
+def test_claiming_in_the_cloud_sends_the_seat_its_own_path(tmp_path, monkeypatch):
+    """The desk's path for a project means nothing inside a seat container.
+
+    Regression: the desk used to hand over its own /app/data/projects/<slug>,
+    which the seat could not stat, so every project-backed claim failed with
+    "seat did not switch to this project's folder".
+    """
+    monkeypatch.setenv("BYOI_SEATS", "ondemand")
+    monkeypatch.setenv("BYOI_SEAT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "apps.api.seat_sync.set_workspace",
+        lambda seat, path, *a, **k: (sent.append(path), {"ok": True})[1],
+    )
+
+    project = _repo(tmp_path / "projects", "todo-api")
+    desk = TestClient(create_app(tmp_path), headers=HOST)
+    made = desk.post(
+        "/api/projects", json={"kind": "local", "path": str(project), "name": "todo-api"}
+    ).json()
+    brief = desk.post(
+        "/api/board", json={"title": "Ship it", "brief": "b", "project_id": made["id"]}
+    ).json()
+    sid = desk.post(
+        "/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}
+    ).json()["session"]["id"]
+
+    res = desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
+    assert res.status_code == 200, res.text
+    assert sent == [f"{seats.GUEST_WORKSPACE}/todo-api"]
+    assert str(project) not in sent
+    # and the guest actually has the code to work on
+    assert (seats.workspace_dir(sid) / "todo-api" / "README.md").is_file()
+
+
+def test_claiming_on_one_pc_still_opens_the_project_itself(tmp_path, monkeypatch):
+    """Static mode shares a filesystem, so cloning would only add a copy."""
+    monkeypatch.delenv("BYOI_SEATS", raising=False)
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "apps.api.seat_sync.set_workspace",
+        lambda seat, path, *a, **k: (sent.append(path), {"ok": True})[1],
+    )
+
+    project = _repo(tmp_path / "projects", "todo-api")
+    desk = TestClient(create_app(tmp_path), headers=HOST)
+    made = desk.post(
+        "/api/projects", json={"kind": "local", "path": str(project), "name": "todo-api"}
+    ).json()
+    brief = desk.post(
+        "/api/board", json={"title": "Ship it", "brief": "b", "project_id": made["id"]}
+    ).json()
+    sid = desk.post(
+        "/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}
+    ).json()["session"]["id"]
+
+    desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
+    assert sent == [str(project.resolve())]

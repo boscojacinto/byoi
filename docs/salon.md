@@ -281,7 +281,32 @@ On the desk (`http://127.0.0.1:8080/`):
    clone an existing URL, or attach a local folder.
 2. **Publish** a brief with that project selected, or assign a project on an
    existing brief.
-3. Guest claims the brief → seat `cwd` switches to `project.local_path`.
+3. Guest claims the brief → seat `cwd` switches to the project.
+
+Where that folder is depends on the shape:
+
+| | `static` (salon PC) | `ondemand` (cloud) |
+|---|---|---|
+| Seat `cwd` | `project.local_path` | `/app/data/workspace/<name>` |
+| How it gets there | already the same disk | cloned at claim time |
+| Board copy | opened directly | never mounted into a seat |
+
+A seat container cannot simply open `project.local_path` — the projects folder
+belongs to the desk. Mounting it in would be worse than an inconvenience: every
+guest would get read and write over every other guest's work, the same hazard
+that already keeps a visit to the Claude accounts it was allocated. So the desk
+clones the project into that visit's own workspace
+(`seats.seed_workspace`), which is a directory under
+`data/seat-runtime/byoi-seat-<session>/` bind-mounted at `/app/data/workspace`.
+
+Two things follow from it being a bind mount rather than a named volume: the
+desk can read the guest's tree back, which is how grading fetches the submission
+ref without the seat pushing anywhere (so a seat needs no git credentials), and
+freeing the seat removes the workspace along with the rest of the visit.
+
+The clone's `origin` is set to whatever the project calls `origin`, so a guest
+running `git push` aims at the real remote and not at a path that exists only
+inside the desk container. A project that is not a git repo is copied instead.
 
 Each brief can include an **acceptance spec**. When the guest marks shipped, the
 phone shows passing and failing cases — one per requirement in the spec.
@@ -320,6 +345,10 @@ Log the host account in once, alongside the seat accounts:
 ./scripts/seat-claude-login.sh --account claude-host
 CLAUDE_CONFIG_DIR=data/claude-accounts/claude-host claude setup-token
 ```
+
+In the cloud the desk fetches the ref straight out of the seat's workspace: it
+is a bind mount, so both containers see the same repository and nothing has to
+be pushed anywhere. The seat needs no git credentials for grading to work.
 
 On one PC the desk fetches the ref straight off the project folder. On two
 machines the seat pushes it to the project's `origin` first, so the seat needs
