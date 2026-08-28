@@ -27,9 +27,13 @@ https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_C
     && rm -rf /var/lib/apt/lists/*
 
 # Vercel is invoked by the desk, from a checkout, with a scrubbed environment.
+# Claude Code is here for grading, not for chat: apps/api/testgen.py writes the
+# acceptance suite as BYOI_HOST_CLAUDE_ACCOUNT with --allowedTools "". Without
+# the binary that stage raises and every submission quietly falls back to the
+# seat-side verifier — which is the guest's own session, and defeats the point.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g vercel@latest \
+    && npm install -g vercel@latest @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
 WORKDIR /app
