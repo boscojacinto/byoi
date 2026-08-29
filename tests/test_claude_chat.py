@@ -503,7 +503,7 @@ def test_a_flag_this_build_lacks_is_left_out(monkeypatch):
     guest reached the chat, the seat spawned claude, and the phone showed
     "Claude Code exited" with no other clue.
     """
-    claude_chat.supports_flag.cache_clear()
+    claude_chat._help_text.cache_clear()
     monkeypatch.setattr(
         claude_chat, "supports_flag", lambda b, f: f != "--forward-subagent-text"
     )
@@ -516,7 +516,7 @@ def test_a_flag_this_build_lacks_is_left_out(monkeypatch):
 
 def test_the_flags_that_make_it_a_chat_are_not_optional(monkeypatch):
     """Degrading on the extras is right; degrading on these is not."""
-    claude_chat.supports_flag.cache_clear()
+    claude_chat._help_text.cache_clear()
     monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: False)
     argv = claude_chat.claude_argv()
 
@@ -529,7 +529,7 @@ def test_the_flags_that_make_it_a_chat_are_not_optional(monkeypatch):
 
 
 def test_support_is_probed_from_the_binarys_own_help(monkeypatch):
-    claude_chat.supports_flag.cache_clear()
+    claude_chat._help_text.cache_clear()
     seen = []
 
     class Res:
@@ -544,10 +544,12 @@ def test_support_is_probed_from_the_binarys_own_help(monkeypatch):
     assert claude_chat.supports_flag("claude", "--prompt-suggestions") is True
     assert claude_chat.supports_flag("claude", "--forward-subagent-text") is False
     assert seen[0] == ["claude", "--help"]
+    # Once, not once per flag: the guest waits on this before their first reply.
+    assert len(seen) == 1
 
 
 def test_a_binary_that_will_not_run_drops_the_extras(monkeypatch):
-    claude_chat.supports_flag.cache_clear()
+    claude_chat._help_text.cache_clear()
     monkeypatch.setattr(
         claude_chat.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
     )

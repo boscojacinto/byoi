@@ -112,16 +112,25 @@ OPTIONAL_FLAGS = (
 )
 
 
-@lru_cache(maxsize=16)
-def supports_flag(binary: str, flag: str) -> bool:
-    """Whether this Claude Code build advertises *flag* in its help."""
+@lru_cache(maxsize=4)
+def _help_text(binary: str) -> str:
+    """`claude --help`, once per binary.
+
+    Cached on the text rather than per flag: asking four times cost four
+    subprocesses on the first message of a visit, which the guest waits for.
+    """
     try:
         res = subprocess.run(
             [binary, "--help"], capture_output=True, text=True, timeout=30
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return flag in (res.stdout or "") + (res.stderr or "")
+        return ""
+    return (res.stdout or "") + (res.stderr or "")
+
+
+def supports_flag(binary: str, flag: str) -> bool:
+    """Whether this Claude Code build advertises *flag* in its help."""
+    return flag in _help_text(binary)
 
 
 def claude_argv() -> list[str]:
