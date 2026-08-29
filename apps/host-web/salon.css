@@ -108,6 +108,9 @@ nav { display: flex; gap: 0.15rem; margin-left: auto; }
 #pane-live.is-on {
   grid-template-columns: 1fr;
 }
+#pane-qa.is-on {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -304,12 +307,49 @@ form button, .checkin button[type="submit"] {
   image-rendering: pixelated;
   border-radius: 8px;
 }
+.qa-list { display: grid; gap: 0.6rem; margin-top: 0.7rem; }
+.qa-item {
+  background: rgba(8, 14, 10, 0.7);
+  border: 1px solid rgba(61, 255, 138, 0.14);
+  border-radius: 12px;
+  padding: 0.65rem 0.75rem;
+}
+.qa-item .card-head { margin-bottom: 0.3rem; }
+.qa-item strong { font-size: 0.88rem; }
+.qa-item textarea { min-height: 4.5rem; }
+.qa-item .row { justify-content: flex-end; margin-top: 0.2rem; }
+.badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.badge.is-running { color: var(--amber); border-color: rgba(224, 168, 92, 0.5); }
+.badge.is-passed { color: var(--neon); border-color: rgba(61, 255, 138, 0.5); }
+.badge.is-failed { color: var(--danger); border-color: rgba(255, 107, 90, 0.5); }
+.cases { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; gap: 0.3rem; }
+.cases li {
+  font-size: 0.82rem;
+  padding: 0.1rem 0;
+  border-bottom: 1px dashed rgba(61, 255, 138, 0.1);
+}
+.cases li:last-child { border-bottom: 0; }
+.cases li span { display: block; color: var(--muted); font-size: 0.78rem; }
+.cases li.pass { color: var(--neon); }
+.cases li.fail { color: #ff9d9d; }
+.cases li.pass span, .cases li.fail span { color: var(--muted); }
+
 .add { margin-top: 0.7rem; }
 .add summary { cursor: pointer; color: var(--neon); font-weight: 600; }
 .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 
 @media (max-width: 900px) {
-  #pane-floor.is-on { grid-template-columns: 1fr; }
+  #pane-floor.is-on, #pane-qa.is-on { grid-template-columns: 1fr; }
   html, body.desk { overflow: auto; height: auto; }
   .dash { height: auto; }
   nav { margin-left: 0; }

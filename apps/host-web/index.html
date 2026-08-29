@@ -18,6 +18,7 @@
     <nav>
       <button type="button" class="tab is-on" data-pane="floor">Floor</button>
       <button type="button" class="tab" data-pane="solutions">Solutions</button>
+      <button type="button" class="tab" data-pane="qa">Specs &amp; QA</button>
       <button type="button" class="tab" data-pane="live">Live</button>
     </nav>
     <button type="button" class="cta" id="openSit">Sit a guest</button>
@@ -46,6 +47,25 @@
           <button type="button" class="text" id="openAdd">Add</button>
         </div>
         <div id="board" class="queue"></div>
+      </article>
+    </section>
+
+    <section class="pane" id="pane-qa">
+      <article class="card qa-briefs">
+        <div class="card-head">
+          <h2>Specs &amp; QA</h2>
+        </div>
+        <p class="quiet">Plain-English facts each brief must satisfy. Saved here, an
+          agent on this desk turns them into a test suite the grader runs blind —
+          it never sees the guest's code, only the spec.</p>
+        <div id="qaBriefs" class="qa-list"></div>
+      </article>
+      <article class="card qa-grading">
+        <div class="card-head">
+          <h2>Grading results</h2>
+        </div>
+        <p class="quiet">Fills in the moment a guest taps <strong>I'm done</strong>.</p>
+        <div id="qaGrading" class="qa-list"></div>
       </article>
     </section>
 
@@ -87,7 +107,7 @@
       <form id="newBrief">
         <input name="title" placeholder="Title" required />
         <textarea name="brief" placeholder="What done looks like" required></textarea>
-        <textarea name="spec" placeholder="How we’ll know it works (optional)"></textarea>
+        <textarea name="spec" placeholder="Specs &amp; QA — plain-English facts that must hold, one per line (optional)"></textarea>
         <div class="row">
           <select name="project_id" id="projectSel"><option value="">Project</option></select>
           <button type="button" class="text" id="fetchProject">Fetch repo</button>

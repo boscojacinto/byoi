@@ -404,6 +404,14 @@ class Store:
         self.conn.commit()
         return self.board_item(board_id)  # type: ignore[return-value]
 
+    def set_board_spec(self, board_id: str, spec: str) -> dict[str, Any]:
+        item = self.board_item(board_id)
+        if not item:
+            raise KeyError("unknown board item")
+        self.conn.execute("UPDATE board SET spec=? WHERE id=?", ((spec or "").strip(), board_id))
+        self.conn.commit()
+        return self.board_item(board_id)  # type: ignore[return-value]
+
     def check_in(self, seat_id: str, coder_name: str) -> dict[str, Any]:
         seat = self.seat(seat_id)
         if not seat:
@@ -576,6 +584,28 @@ class Store:
         )
         self.conn.commit()
         return self.session(session_id)
+
+    def grading_sessions(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Every visit that has ever had a spec graded, most recent first.
+
+        `complete()` flips the seat back to idle and drops the session out of
+        `_live_session` right away, so this is the only place the desk can
+        still find a visit while its suite is running in the background — and
+        afterwards, for the host to review what passed and what didn't.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT s.*, b.title AS brief_title, se.name AS seat_name
+            FROM sessions s
+            LEFT JOIN board b ON b.id = s.board_id
+            LEFT JOIN seats se ON se.id = s.seat_id
+            WHERE s.test_status IS NOT NULL
+            ORDER BY s.started_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._session_dict(row) for row in rows]  # type: ignore[misc]
 
     # ------------------------------------------------------------- deployments
 
