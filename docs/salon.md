@@ -555,6 +555,27 @@ so an empty roll or a closed laptop delays a piece of paper, not a visit. A clai
 that is never finished is handed out again after two minutes — reprinting a slip
 is cheap, never printing one is not.
 
+## Backing up what cannot be recreated
+
+```bash
+./scripts/salon-backup.sh                 # -> data/backups/salon-<stamp>.tar.gz
+./scripts/salon-backup.sh /mnt/elsewhere
+```
+
+Four paths, because losing them means redoing work no command can redo: the
+`setup-token` logins in `data/claude-accounts/`, the salon CA in `data/tls/`
+(re-minting it invalidates every seat identity), `data/secrets/`, and
+`data/salon.db`. `salon.db` is copied through SQLite's backup API rather than
+`cp`, since the desk is writing to it.
+
+`data/projects/` is deliberately excluded — it is git, with an `origin` — as are
+guest workspaces under `data/seat-runtime/`, which are destroyed at checkout.
+
+On a cloud VM this sits *alongside* volume snapshots rather than replacing them:
+a snapshot restores a dead machine, this restores one credential file without
+rolling the whole disk back. The archive holds a private CA key and live Claude
+credentials — treat it like an SSH key and copy it off the box.
+
 ## Optional SSH / TTY
 
 SSH and `/tty` are operator side doors onto tmux. They are **not** the guest

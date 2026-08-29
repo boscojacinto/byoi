@@ -25,6 +25,7 @@ from apps.tls import TlsPaths, issue_seat_cert, paths as tls_paths
 
 from . import caddy, seat_sync
 from . import infra as desk_infra
+from .testgen import host_account_label
 
 log = logging.getLogger("uvicorn.error")
 
@@ -226,13 +227,29 @@ def mint_identity(session_id: str) -> Path:
 
 
 def allocate_accounts(store: Any, session_id: str, *, want: int = 2) -> list[str]:
-    """Claude accounts for this visit that no other live visit is using."""
+    """Claude accounts for this visit that no other live visit is using.
+
+    The account the desk grades with is never one of them. It writes the
+    acceptance suite blind, so handing it to the seat would mean the account
+    that judges the work is the account that wrote it — and since every
+    allocated account is bind-mounted into a container where the guest's Claude
+    has Bash, it would hand over that credential too. With a small pool this is
+    not a corner case: `claude-host` sorts ahead of `claude-seat-1`.
+    """
+    host = host_account_label()
     held = store.accounts_in_use(excluding=session_id)
-    labels = [a.label for a in AccountPool().discover() if a.label not in held]
+    pool = [a.label for a in AccountPool().discover() if a.label != host]
+    labels = [label for label in pool if label not in held]
     if not labels:
+        # Two different problems, and the operator acts on them differently.
+        if pool:
+            raise SeatError(
+                "every Claude account is already in use by a live seat — "
+                "free a seat or add another account dir"
+            )
         raise SeatError(
-            "every Claude account is already in use by a live seat — "
-            "free a seat or add another account dir"
+            f"no Claude account for a seat — {host!r} is reserved for grading; "
+            "add another account dir"
         )
     return labels[:want]
 

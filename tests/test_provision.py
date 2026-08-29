@@ -546,3 +546,67 @@ def test_claiming_on_one_pc_still_opens_the_project_itself(tmp_path, monkeypatch
 
     desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
     assert sent == [str(project.resolve())]
+
+
+# --- the grading account is not a seat account ------------------------------
+
+
+def test_the_host_account_is_never_given_to_a_seat(tmp_path, monkeypatch):
+    """It grades blind, so the guest's Claude must not be running as it.
+
+    With a two-account pool this is the default outcome, not an edge case:
+    `claude-host` sorts ahead of `claude-seat-1`, so it was allocated first and
+    became the seat's BYOI_CLAUDE_ACCOUNT.
+    """
+    accounts = tmp_path / "accounts"
+    for name in ("claude-host", "claude-seat-1"):
+        (accounts / name).mkdir(parents=True)
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(accounts))
+
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    labels = seats.allocate_accounts(store, sess["id"])
+
+    assert labels == ["claude-seat-1"]
+    assert "claude-host" not in labels
+
+
+def test_the_host_account_alone_is_not_a_usable_pool(tmp_path, monkeypatch):
+    accounts = tmp_path / "accounts"
+    (accounts / "claude-host").mkdir(parents=True)
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(accounts))
+
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    with pytest.raises(seats.SeatError) as err:
+        seats.allocate_accounts(store, sess["id"])
+    assert "reserved for grading" in str(err.value)
+
+
+def test_the_reserved_label_follows_the_env(tmp_path, monkeypatch):
+    accounts = tmp_path / "accounts"
+    for name in ("claude-host", "grader"):
+        (accounts / name).mkdir(parents=True)
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(accounts))
+    monkeypatch.setenv("BYOI_HOST_CLAUDE_ACCOUNT", "grader")
+
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    assert seats.allocate_accounts(store, sess["id"]) == ["claude-host"]
+
+
+def test_the_seat_never_mounts_the_grading_credentials(tmp_path, monkeypatch):
+    """Allocated accounts are bind-mounted, and the guest's Claude has Bash."""
+    accounts = tmp_path / "accounts"
+    for name in ("claude-host", "claude-seat-1"):
+        (accounts / name).mkdir(parents=True)
+    monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(accounts))
+
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    labels = seats.allocate_accounts(store, sess["id"])
+    joined = " ".join(
+        _args(monkeypatch, tmp_path, labels=labels)
+    )
+    assert "claude-seat-1" in joined
+    assert "claude-host" not in joined
