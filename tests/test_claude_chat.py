@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from apps.seat import claude_chat
 from apps.seat.accounts import SUBMIT_MARK
 
 from apps.seat.claude_chat import (
@@ -490,3 +491,64 @@ def test_reset_disarms_the_swallow_flag(tmp_path, monkeypatch):
     chat.reset()
     assert chat._swallow_result is False
     assert chat._should_swallow({"type": "result"}) is False
+
+
+# --- argv against a moving Claude Code -------------------------------------
+
+
+def test_a_flag_this_build_lacks_is_left_out(monkeypatch):
+    """`unknown option` kills the process before it reads stdin.
+
+    Measured on Claude Code 2.1.197, which has no --forward-subagent-text: the
+    guest reached the chat, the seat spawned claude, and the phone showed
+    "Claude Code exited" with no other clue.
+    """
+    claude_chat.supports_flag.cache_clear()
+    monkeypatch.setattr(
+        claude_chat, "supports_flag", lambda b, f: f != "--forward-subagent-text"
+    )
+    argv = claude_chat.claude_argv()
+
+    assert "--forward-subagent-text" not in argv
+    assert "--include-partial-messages" in argv
+    assert "--prompt-suggestions" in argv
+
+
+def test_the_flags_that_make_it_a_chat_are_not_optional(monkeypatch):
+    """Degrading on the extras is right; degrading on these is not."""
+    claude_chat.supports_flag.cache_clear()
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: False)
+    argv = claude_chat.claude_argv()
+
+    assert argv[1] == "-p"
+    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert argv[argv.index("--input-format") + 1] == "stream-json"
+    assert "--permission-mode" in argv
+    for flag in claude_chat.OPTIONAL_FLAGS:
+        assert flag not in argv
+
+
+def test_support_is_probed_from_the_binarys_own_help(monkeypatch):
+    claude_chat.supports_flag.cache_clear()
+    seen = []
+
+    class Res:
+        stdout = "  --prompt-suggestions   Suggest follow-ups\n"
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        return Res()
+
+    monkeypatch.setattr(claude_chat.subprocess, "run", fake_run)
+    assert claude_chat.supports_flag("claude", "--prompt-suggestions") is True
+    assert claude_chat.supports_flag("claude", "--forward-subagent-text") is False
+    assert seen[0] == ["claude", "--help"]
+
+
+def test_a_binary_that_will_not_run_drops_the_extras(monkeypatch):
+    claude_chat.supports_flag.cache_clear()
+    monkeypatch.setattr(
+        claude_chat.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+    )
+    assert claude_chat.supports_flag("claude", "--prompt-suggestions") is False

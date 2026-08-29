@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -98,6 +100,30 @@ def submit_wait() -> float:
         return 10.0
 
 
+# Flags that improve the chat but are not what makes it work. Claude Code
+# releases add and drop these, and an `unknown option` is fatal: the process
+# exits before it reads a byte of stdin, and the phone shows "Claude Code
+# exited" with nothing to go on. Degrade instead.
+OPTIONAL_FLAGS = (
+    "--include-partial-messages",
+    "--replay-user-messages",
+    "--forward-subagent-text",
+    "--prompt-suggestions",
+)
+
+
+@lru_cache(maxsize=16)
+def supports_flag(binary: str, flag: str) -> bool:
+    """Whether this Claude Code build advertises *flag* in its help."""
+    try:
+        res = subprocess.run(
+            [binary, "--help"], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return flag in (res.stdout or "") + (res.stderr or "")
+
+
 def claude_argv() -> list[str]:
     binary = shutil.which(CLAUDE_BIN) or CLAUDE_BIN
     mode = os.environ.get("BYOI_CLAUDE_PERMISSION_MODE", "acceptEdits")
@@ -109,13 +135,9 @@ def claude_argv() -> list[str]:
         "--input-format",
         "stream-json",
         "--verbose",
-        "--include-partial-messages",
-        "--replay-user-messages",
-        "--forward-subagent-text",
-        "--prompt-suggestions",
-        "--permission-mode",
-        mode,
     ]
+    argv.extend(f for f in OPTIONAL_FLAGS if supports_flag(binary, f))
+    argv.extend(["--permission-mode", mode])
     tools = os.environ.get("BYOI_CLAUDE_TOOLS")
     if tools is not None and tools.strip():
         argv.extend(["--allowedTools", tools])
