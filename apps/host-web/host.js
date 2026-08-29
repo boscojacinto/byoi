@@ -75,12 +75,16 @@ function spark(seats) {
 }
 
 function showPane(name) {
-  if (!["floor", "solutions", "live"].includes(name)) name = "floor";
+  if (!["floor", "solutions", "qa", "live"].includes(name)) name = "floor";
   lastPane = name;
   document.querySelectorAll(".pane").forEach((el) => el.classList.toggle("is-on", el.id === `pane-${name}`));
   document.querySelectorAll(".tab").forEach((btn) => btn.classList.toggle("is-on", btn.getAttribute("data-pane") === name));
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   if (name === "live") refreshLive().catch(() => {});
+  if (name === "qa") {
+    refreshQABriefs().catch(() => {});
+    refreshQAGrading().catch(() => {});
+  }
 }
 
 function openModal(id) {
@@ -232,6 +236,94 @@ async function refreshLive() {
   root.scrollTop = root.scrollHeight;
 }
 
+function caseRows(cases) {
+  return (cases || [])
+    .map(
+      (c) => `<li class="${c.pass ? "pass" : "fail"}">${c.pass ? "✓" : "✕"} <strong>${escapeHtml(c.name)}</strong>
+      ${c.detail ? `<span>${escapeHtml(c.detail)}</span>` : ""}</li>`
+    )
+    .join("");
+}
+
+function testBadge(status) {
+  const cls = { running: "is-running", passed: "is-passed", failed: "is-failed" }[status] || "";
+  const label = { running: "Running", passed: "Passed", failed: "Failed" }[status] || "—";
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+async function refreshQABriefs() {
+  const { items } = await api("/api/board");
+  $("qaBriefs").innerHTML =
+    items
+      .map(
+        (i) => `<article class="qa-item">
+        <div class="card-head"><strong>${escapeHtml(i.title)}</strong></div>
+        <form class="qaSpecForm" data-brief="${i.id}">
+          <textarea name="spec" placeholder="Plain-English facts, one per line (optional)">${escapeHtml(i.spec || "")}</textarea>
+          <div class="row"><button type="submit">Save</button></div>
+        </form>
+      </article>`
+      )
+      .join("") || `<p class="quiet">No briefs yet — add one from Solutions.</p>`;
+  $("qaBriefs")
+    .querySelectorAll(".qaSpecForm")
+    .forEach((form) => {
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const id = form.getAttribute("data-brief");
+        const fd = new FormData(form);
+        const btn = form.querySelector("button");
+        const was = btn.textContent;
+        btn.textContent = "Saving…";
+        try {
+          await api(`/api/board/${id}/spec`, {
+            method: "POST",
+            headers: jsonHeaders,
+            body: JSON.stringify({ spec: fd.get("spec") || "" }),
+          });
+          btn.textContent = "Saved";
+        } catch (err) {
+          btn.textContent = was;
+          alert(err.message);
+          return;
+        }
+        setTimeout(() => (btn.textContent = was), 1200);
+      });
+    });
+}
+
+async function refreshQAGrading() {
+  let sessions;
+  try {
+    ({ sessions } = await api("/api/sessions/grading"));
+  } catch (err) {
+    $("qaGrading").innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
+    return;
+  }
+  $("qaGrading").innerHTML =
+    sessions
+      .map((s) => {
+        const report = s.test_report || {};
+        const status = s.test_status || "running";
+        const heading =
+          status === "running"
+            ? "Testing against the spec…"
+            : status === "passed"
+              ? `${report.passed ?? 0} passed`
+              : `${report.failed ?? 0} failed · ${report.passed ?? 0} passed`;
+        return `<article class="qa-item">
+          <div class="card-head">
+            <strong>${escapeHtml(s.coder_name)} · ${escapeHtml(s.brief_title || "untitled")}</strong>
+            ${testBadge(status)}
+          </div>
+          <p class="quiet">${escapeHtml(s.seat_name || "")} · ${escapeHtml(heading)}</p>
+          ${report.summary ? `<p class="quiet">${escapeHtml(report.summary)}</p>` : ""}
+          <ul class="cases">${caseRows(report.cases) || (status === "running" ? "" : "<li>Nothing to report.</li>")}</ul>
+        </article>`;
+      })
+      .join("") || `<p class="quiet">Nothing graded yet — results appear here once a guest taps “I’m done”.</p>`;
+}
+
 function quotaLabel(quota) {
   if (!quota) return "";
   const bits = [];
@@ -344,6 +436,7 @@ async function refresh() {
   await refreshPrinter();
 
   if (lastPane === "live") await refreshLive().catch(() => {});
+  if (lastPane === "qa") await refreshQAGrading().catch(() => {});
 }
 
 document.querySelectorAll("[data-pane]").forEach((btn) => {
@@ -516,3 +609,6 @@ setInterval(() => {
 setInterval(() => {
   if (lastPane === "live" && $("signin").hidden) refreshLive().catch(() => {});
 }, 2000);
+setInterval(() => {
+  if (lastPane === "qa" && $("signin").hidden) refreshQAGrading().catch(() => {});
+}, 3000);

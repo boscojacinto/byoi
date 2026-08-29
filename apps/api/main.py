@@ -91,6 +91,10 @@ class BoardProjectIn(BaseModel):
     project_id: str | None = None
 
 
+class BoardSpecIn(BaseModel):
+    spec: str = ""
+
+
 class LoginIn(BaseModel):
     password: str
 
@@ -286,6 +290,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         require_operator(request, authorization)
         try:
             return store.set_board_project(board_id, body.project_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/board/{board_id}/spec")
+    def assign_spec(
+        request: Request,
+        board_id: str,
+        body: BoardSpecIn,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        """Specs & QA: (re)write the acceptance spec on an existing brief. The
+        next 'I'm done' on this brief is graded against whatever is saved
+        here — a spec can be tightened after a brief has already gone out."""
+        require_operator(request, authorization)
+        try:
+            return store.set_board_spec(board_id, body.spec)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -756,6 +776,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if not store.session(session_id):
             raise HTTPException(404, "unknown session")
         return {"session_id": session_id, "deployment": store.deployment_for_session(session_id)}
+
+    @app.get("/api/sessions/grading")
+    def grading_sessions(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict:
+        """Specs & QA: what the desk shows once a guest taps 'I'm done' — the
+        seat and board panels stop tracking a visit the moment it completes,
+        so this is the only place left to watch a suite run and see what it
+        found, including after the seat has been freed."""
+        require_operator(request, authorization)
+        return {"sessions": store.grading_sessions()}
 
     @app.get("/api/sessions/{session_id}/tests")
     def session_tests(session_id: str) -> dict:
