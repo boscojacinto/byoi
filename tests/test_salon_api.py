@@ -163,12 +163,55 @@ def test_desk_tabs_floor_solutions_live(tmp_path: Path):
     html = _client(tmp_path).get("/").text
     assert 'data-pane="floor"' in html
     assert 'data-pane="solutions"' in html
+    assert 'data-pane="qa"' in html
     assert 'data-pane="live"' in html
     assert "Sit a guest" in html
     assert "Wellness" not in html
     assert ">Queue<" not in html
     assert 'id="sitModal"' in html
     assert 'id="qr"' in html
+
+
+def test_host_can_edit_spec_on_existing_brief(tmp_path: Path):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    board_id = client.get("/api/board").json()["items"][0]["id"]
+    assert client.post(
+        f"/api/board/{board_id}/spec", json={"spec": "the button is green"}
+    ).status_code == 401
+    res = client.post(
+        f"/api/board/{board_id}/spec", json={"spec": "the button is green"}, headers=headers
+    )
+    assert res.status_code == 200
+    assert res.json()["spec"] == "the button is green"
+    assert client.get("/api/board").json()["items"][0]["spec"] == "the button is green"
+    assert client.post(
+        "/api/board/not-a-real-id", json={"spec": "x"}, headers=headers
+    ).status_code == 404
+
+
+def test_grading_feed_tracks_a_completed_visit(tmp_path: Path):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    assert client.get("/api/sessions/grading").status_code == 401
+    assert client.get("/api/sessions/grading", headers=headers).json()["sessions"] == []
+    check = client.post(
+        "/api/sessions/check-in",
+        json={"seat_id": "seat-1", "coder_name": "Ada"},
+        headers=headers,
+    )
+    sid = check.json()["session"]["id"]
+    board_id = client.get("/api/board").json()["items"][0]["id"]
+    client.post(f"/api/sessions/{sid}/claim", json={"board_id": board_id})
+    client.post(f"/api/sessions/{sid}/complete")
+    grading = client.get("/api/sessions/grading", headers=headers).json()["sessions"]
+    assert len(grading) == 1
+    row = grading[0]
+    assert row["id"] == sid
+    assert row["coder_name"] == "Ada"
+    assert row["seat_name"]
+    assert row["test_status"] in ("passed", "failed")
+    assert "cases" in row["test_report"]
 
 
 def test_api_live_mirrors_guest_history(tmp_path: Path, monkeypatch):

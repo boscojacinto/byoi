@@ -355,8 +355,17 @@ The clone's `origin` is set to whatever the project calls `origin`, so a guest
 running `git push` aims at the real remote and not at a path that exists only
 inside the desk container. A project that is not a git repo is copied instead.
 
-Each brief can include an **acceptance spec**. When the guest marks shipped, the
-phone shows passing and failing cases — one per requirement in the spec.
+Each brief can include an **acceptance spec**: plain-English facts the
+solution must satisfy, one per line. When the guest marks shipped, the phone
+shows passing and failing cases — one per requirement in the spec.
+
+The desk's **Specs & QA** tab is where the host writes and edits that spec —
+at brief creation, or any time after, on an existing one. The next "I'm done"
+against that brief is graded against whatever is saved there. The same tab
+lists every graded visit, most recent first, with its pass/fail cases: the
+seat and board panels stop tracking a visit the instant it completes (grading
+still runs in the background against the seat's workspace), so this is the
+only place on the desk to watch a suite run and see what it found.
 
 ## Grading a shipped solution
 
