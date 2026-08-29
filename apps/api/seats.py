@@ -69,6 +69,18 @@ def control_network() -> str:
     return os.environ.get("BYOI_CONTROL_NETWORK", "byoi-ctl")
 
 
+def house_url() -> str:
+    """What a seat container should call the desk.
+
+    The seat proxies /api/* through to the house — that is how the guest's
+    phone reaches the board, /api/join and the claim. Its default is
+    127.0.0.1:8080, which is the salon PC's desk and nothing at all inside a
+    container, so it has to be told. Compose names the desk `byoi-desk` and
+    both sit on the edge network.
+    """
+    return os.environ.get("BYOI_SEAT_HOUSE_URL", "http://byoi-desk:8080")
+
+
 def max_seats() -> int:
     try:
         return max(1, int(os.environ.get("BYOI_MAX_SEATS", "4")))
@@ -278,6 +290,7 @@ def _run_args(session_id: str, *, tls_dir: Path, labels: list[str], seat: dict[s
         "-e", f"BYOI_SEAT_ID={seat.get('id', 'seat-1')}",
         "-e", f"BYOI_SEAT_NAME={seat.get('name', 'Seat')}",
         "-e", f"BYOI_SESSION_ID={session_id}",
+        "-e", f"BYOI_HOUSE_URL={house_url()}",
         "-e", "BYOI_GUEST_NET=public",
         "-e", "BYOI_GUEST_TLS=0",
         "-e", "BYOI_TLS_DIR=/app/data/tls",

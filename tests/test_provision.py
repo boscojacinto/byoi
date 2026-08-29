@@ -610,3 +610,18 @@ def test_the_seat_never_mounts_the_grading_credentials(tmp_path, monkeypatch):
     )
     assert "claude-seat-1" in joined
     assert "claude-host" not in joined
+
+
+def test_the_seat_is_told_where_the_desk_is(monkeypatch, tmp_path):
+    """The guest's Sit button is /api/join, proxied through the seat to the desk.
+
+    The default house URL is 127.0.0.1:8080 — the salon PC's desk, and nothing
+    at all inside a container. Left unset, every guest got "request failed".
+    """
+    args = _args(monkeypatch, tmp_path)
+    assert "BYOI_HOUSE_URL=http://byoi-desk:8080" in args
+
+
+def test_the_house_url_can_be_overridden(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYOI_SEAT_HOUSE_URL", "http://desk.internal:9000")
+    assert "BYOI_HOUSE_URL=http://desk.internal:9000" in _args(monkeypatch, tmp_path)
