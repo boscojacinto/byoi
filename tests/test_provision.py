@@ -313,6 +313,92 @@ def test_teardown_reports_problems_but_never_raises(
     assert any("seat is wedged" in p for p in result["problems"])
 
 
+def test_lock_keeps_the_container_and_workspace_alive(
+    tmp_path, fake_docker, caddy_admin, ready_seat, monkeypatch
+):
+    """Locking a guest out must not remove anything grading still needs."""
+    revoked = []
+    monkeypatch.setattr(seats.seat_sync, "revoke_session", lambda *a, **k: revoked.append(1) or {"ok": True})
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    seats.provision(store, sess, store.seat("seat-1"))
+
+    workspace = seats.workspace_dir(sess["id"])
+    (workspace / "scratch.txt").write_text("guest work")
+
+    result = seats.lock(sess["id"], store.seat("seat-1"))
+    assert result["ok"], result["problems"]
+    assert revoked == [1]
+    assert f"rm -f byoi-seat-{sess['id']}" not in fake_docker.read_text()
+    assert (workspace / "scratch.txt").exists()
+    assert caddy_admin["routes"]
+
+
+def test_destroy_removes_everything_lock_left(
+    tmp_path, fake_docker, caddy_admin, ready_seat, monkeypatch
+):
+    """destroy() finishes what lock() deliberately left standing."""
+    monkeypatch.setattr(seats.seat_sync, "revoke_session", lambda *a, **k: {"ok": True})
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    seats.provision(store, sess, store.seat("seat-1"))
+    workspace = seats.workspace_dir(sess["id"])
+    (workspace / "scratch.txt").write_text("guest work")
+    seats.lock(sess["id"], store.seat("seat-1"))
+
+    result = seats.destroy(store, sess["id"], store.seat("seat-1"))
+    assert result["ok"], result["problems"]
+    assert f"rm -f byoi-seat-{sess['id']}" in fake_docker.read_text()
+    assert not workspace.exists()
+    assert not caddy_admin["routes"]
+    assert store.session(sess["id"])["account_labels"] == []
+
+
+def test_complete_grades_before_it_destroys_the_seat_on_demand(tmp_path, monkeypatch):
+    """A guest's uncommitted work — and the container grading reads it off of —
+    must survive until grading is done with them. This is the exact bug: the
+    old order destroyed both first, so grading found no seat left to reach and
+    reported a bogus DNS failure instead of the real result."""
+    monkeypatch.setenv("BYOI_SEATS", "ondemand")
+    order: list[str] = []
+    monkeypatch.setattr(
+        "apps.api.seats.lock",
+        lambda session_id, seat: order.append("lock") or {"ok": True, "problems": []},
+    )
+    monkeypatch.setattr(
+        "apps.api.seats.destroy",
+        lambda store_, session_id, seat: order.append("destroy") or {"ok": True, "problems": []},
+    )
+    monkeypatch.setattr("apps.api.seats.workspace_source", lambda session_id, cwd: Path(cwd) if cwd else None)
+
+    def fake_submit(seat, *, session_id, cwd, push):
+        order.append("submit")
+        assert "destroy" not in order, "the seat was torn down before grading could reach it"
+        return {"ref": "refs/byoi/submissions/x", "toplevel": str(cwd or "")}
+
+    monkeypatch.setattr("apps.api.seat_sync.submit_solution", fake_submit)
+    monkeypatch.setattr(
+        "apps.api.testgen.run",
+        lambda **kw: order.append("grade")
+        or {"summary": "ok", "passed": 1, "failed": 0, "cases": []},
+    )
+
+    desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    store = Store(tmp_path / "salon.db")
+    site = tmp_path / "site"
+    site.mkdir()
+    proj = store.add_project(name="site", local_path=str(site))
+    brief = store.add_board("Fix it", "brief", 60, 40, project_id=proj["id"], spec="- must be fixed")
+    sess = store.check_in("seat-1", "Ada")
+    store.claim(sess["id"], brief["id"])
+
+    res = desk.post(f"/api/sessions/{sess['id']}/complete")
+    assert res.status_code == 200
+    assert order == ["lock", "submit", "grade", "destroy"], order
+    report = desk.get(f"/api/sessions/{sess['id']}/tests").json()["test_report"]
+    assert report["summary"] == "ok"
+
+
 def test_reconcile_clears_a_seat_with_no_live_session(tmp_path, monkeypatch, caddy_admin):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

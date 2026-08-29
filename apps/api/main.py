@@ -535,21 +535,36 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             detail = str(exc)
         store.mark_torn_down(live["id"], detail)
 
-    def _revoke_seat(seat: dict | None, session_id: str | None = None) -> None:
-        _teardown_deployment(session_id)
+    def _lock_seat(seat: dict | None, session_id: str | None) -> None:
+        """Lock the guest out. Leaves the container and its workspace alone —
+        grading still needs to reach both after this returns."""
         if on_demand_seats() and seat and session_id:
-            # The whole container goes, tmpfs and all, so there is no OTP left
-            # to drop. teardown() revokes the guest's own Claude token first and
-            # records rather than raises: an operator with a guest standing
-            # there must always be able to free the chair.
-            result = seats.teardown(store, {"id": session_id}, seat)
+            result = seats.lock(session_id, seat)
             for problem in result.get("problems", []):
-                log.warning("BYOI: freeing %s — %s", seat.get("id"), problem)
+                log.warning("BYOI: locking %s — %s", seat.get("id"), problem)
             return
         try:
             seat_sync.revoke_session(seat)
         except SeatSyncError as exc:
             raise HTTPException(502, "seat did not drop the OTP") from exc
+
+    def _destroy_seat(seat: dict | None, session_id: str | None) -> None:
+        """The rest of teardown. Only call once nothing still needs the
+        container or its bind-mounted workspace — grading fetches the
+        submission ref straight out of it."""
+        if on_demand_seats() and seat and session_id:
+            result = seats.destroy(store, session_id, seat)
+            for problem in result.get("problems", []):
+                log.warning("BYOI: freeing %s — %s", seat.get("id"), problem)
+
+    def _revoke_seat(seat: dict | None, session_id: str | None = None) -> None:
+        """Free a seat right now — for an operator forcing a chair free, or a
+        visit with nothing to grade. The complete() grading path uses
+        _lock_seat then _destroy_seat instead, so the container survives long
+        enough to be graded."""
+        _teardown_deployment(session_id)
+        _lock_seat(seat, session_id)
+        _destroy_seat(seat, session_id)
 
     @app.post("/api/seats/free-all")
     def free_all(request: Request, authorization: str | None = Header(default=None)) -> dict:
@@ -642,6 +657,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             report["summary"] = f"{note} {report.get('summary') or ''}".strip()
         store.set_test_report(session_id, report)
 
+    def _verify_then_destroy(session_id: str, seat: dict | None, item: dict | None) -> None:
+        """Grade first — grading reads the container and its bind-mounted
+        workspace — then release the seat for the next guest."""
+        try:
+            _verify_job(session_id, seat, item)
+        finally:
+            _destroy_seat(seat, session_id)
+
     @app.post("/api/sessions/{session_id}/complete")
     def complete(session_id: str, background_tasks: BackgroundTasks) -> dict:
         sess = store.session(session_id)
@@ -649,13 +672,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(404, "unknown session")
         item = store.board_item(sess["board_id"]) if sess.get("board_id") else None
         seat = store.seat(sess["seat_id"])
-        _revoke_seat(seat, session_id)
-        done = store.complete(session_id)
         testing = bool((item or {}).get("spec"))
+        _teardown_deployment(session_id)
+        _lock_seat(seat, session_id)
+        done = store.complete(session_id)
         if testing:
+            # The container and workspace stay up until grading has read what
+            # it needs from them — destroying either first is what used to
+            # turn a real "seat did not pin a submission ref" into a bogus DNS
+            # failure, after the container that grading needed was already gone.
             store.set_test_running(session_id)
-            background_tasks.add_task(_verify_job, session_id, seat, item)
+            background_tasks.add_task(_verify_then_destroy, session_id, seat, item)
             done = store.session(session_id)
+        else:
+            _destroy_seat(seat, session_id)
         return {"session": done, "testing": testing, "item": item}
 
     def _deploy_job(deployment_id: str, session_id: str, seat: dict | None, item: dict | None) -> None:

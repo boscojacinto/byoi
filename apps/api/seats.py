@@ -384,24 +384,38 @@ def wait_until_ready(seat: dict[str, Any], *, timeout: float | None = None) -> N
 # --- teardown ---------------------------------------------------------------
 
 
-def teardown(store: Any, session: dict[str, Any], seat: dict[str, Any]) -> dict[str, Any]:
-    """Destroy everything this visit created. Never raises.
+def lock(session_id: str, seat: dict[str, Any]) -> dict[str, Any]:
+    """Lock the guest out. Never raises.
 
-    Freeing a seat must always succeed — an operator with a guest standing there
-    cannot be blocked by a container that will not die. Each failure is recorded
-    and reported instead.
+    Revokes and unlinks the guest's own Claude token so they cannot keep
+    chatting once they have tapped "I'm done" — but deliberately touches
+    nothing else. The container, its bind-mounted workspace, and the edge
+    route all survive this call, so grading can still reach the seat (or
+    read the submission ref straight out of the workspace) afterward. Call
+    destroy() once nothing needs them anymore.
     """
-    session_id = session["id"]
+    try:
+        seat_sync.revoke_session({**seat, "agent_url": internal_url(session_id)})
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        problem = f"revoke: {exc}"
+        log.warning("BYOI: locking %s — %s", session_id, problem)
+        return {"ok": False, "problems": [problem]}
+    return {"ok": True, "problems": []}
+
+
+def destroy(store: Any, session_id: str, seat: dict[str, Any]) -> dict[str, Any]:
+    """Destroy everything else this visit created. Never raises.
+
+    Only call this once grading (or whatever else needed the container or its
+    workspace) is finished with them — the container, the edge route, and the
+    guest's bind-mounted tree are all gone the moment this returns. Freeing a
+    seat must always succeed — an operator with a guest standing there cannot
+    be blocked by a container that will not die — so each failure is recorded
+    and reported instead of raised.
+    """
     seat_id = seat.get("id", "")
     name = container_name(session_id)
     problems: list[str] = []
-
-    try:
-        # Revokes and unlinks the guest's own Claude token before the container
-        # (and its tmpfs) goes away, so the refresh token does not outlive it.
-        seat_sync.revoke_session({**seat, "agent_url": internal_url(session_id)})
-    except Exception as exc:  # noqa: BLE001 - reported, never fatal
-        problems.append(f"revoke: {exc}")
 
     for what, fn in (
         ("route", lambda: caddy.unpublish(session_id)),
@@ -424,8 +438,23 @@ def teardown(store: Any, session: dict[str, Any], seat: dict[str, Any]) -> dict[
             problems.append(f"store: {exc}")
 
     if problems:
-        log.warning("BYOI: seat teardown for %s left problems: %s", session_id, "; ".join(problems))
+        log.warning("BYOI: seat destroy for %s left problems: %s", session_id, "; ".join(problems))
     return {"ok": not problems, "problems": problems}
+
+
+def teardown(store: Any, session: dict[str, Any], seat: dict[str, Any]) -> dict[str, Any]:
+    """Destroy everything this visit created, right now. Never raises.
+
+    For a visit with nothing to grade, or an operator forcing a chair free —
+    see lock() and destroy() for the grading path, which keeps the container
+    and its workspace alive until a submission has been pinned and read.
+    """
+    session_id = session["id"]
+    locked = lock(session_id, seat)
+    result = destroy(store, session_id, seat)
+    if not locked["ok"]:
+        result = {"ok": False, "problems": [*locked["problems"], *result["problems"]]}
+    return result
 
 
 def reconcile(store: Any) -> dict[str, Any]:
