@@ -1,7 +1,7 @@
 # BYOI salon (coding + wellness)
 
 A **seat** runs Claude Code. Guests never log into Claude: the operator runs
-`claude setup-token` once per account, and guests open the **BYOI Guest** PWA
+`claude auth login` once per account, and guests open the **BYOI Guest** PWA
 and chat after an **OTP** the host printed on the slip.
 
 This is a phone chat, like the Claude Code mobile app — not a terminal mirror.
@@ -121,11 +121,23 @@ visit.
 
 ```bash
 ./scripts/seat-claude-login.sh --account claude-seat-1
-CLAUDE_CONFIG_DIR=data/claude-accounts/claude-seat-1 claude setup-token
+CLAUDE_CONFIG_DIR=data/claude-accounts/claude-seat-1 claude auth login --claudeai
 
 ./scripts/seat-claude-login.sh --account claude-seat-2
-CLAUDE_CONFIG_DIR=data/claude-accounts/claude-seat-2 claude setup-token
+CLAUDE_CONFIG_DIR=data/claude-accounts/claude-seat-2 claude auth login --claudeai
 ```
+
+Confirm each one took, because an account with no credentials is silently
+skipped by the pool:
+
+```bash
+CLAUDE_CONFIG_DIR=data/claude-accounts/claude-seat-1 claude auth status
+```
+
+`"loggedIn": true` is what you want. **Not `claude setup-token`** — that prints a
+token for you to export as `CLAUDE_CODE_OAUTH_TOKEN` and writes nothing into
+`CLAUDE_CONFIG_DIR`, so the account looks logged in to you and empty to the
+salon. Measured on Claude Code 2.1.197.
 
 Each dir is a separate Anthropic login (`CLAUDE_CONFIG_DIR`, Linux). The guest
 stays on this seat’s URL. When the live login’s 5-hour or 7-day usage hits 80%,
@@ -343,7 +355,7 @@ Log the host account in once, alongside the seat accounts:
 
 ```bash
 ./scripts/seat-claude-login.sh --account claude-host
-CLAUDE_CONFIG_DIR=data/claude-accounts/claude-host claude setup-token
+CLAUDE_CONFIG_DIR=data/claude-accounts/claude-host claude auth login --claudeai
 ```
 
 In the cloud the desk fetches the ref straight out of the seat's workspace: it
@@ -563,7 +575,7 @@ is cheap, never printing one is not.
 ```
 
 Four paths, because losing them means redoing work no command can redo: the
-`setup-token` logins in `data/claude-accounts/`, the salon CA in `data/tls/`
+`auth login` credentials in `data/claude-accounts/`, the salon CA in `data/tls/`
 (re-minting it invalidates every seat identity), `data/secrets/`, and
 `data/salon.db`. `salon.db` is copied through SQLite's backup API rather than
 `cp`, since the desk is writing to it.

@@ -134,7 +134,7 @@ source .venv/bin/activate
 pip install -e ".[salon,dev]"
 ./scripts/salon-tls.sh
 ./scripts/salon-secrets.sh operator                      # desk sign-in password
-./scripts/seat-claude-login.sh --account claude-seat-1   # then: claude setup-token
+./scripts/seat-claude-login.sh --account claude-seat-1   # then: claude auth login
 ./scripts/run-salon.sh           # desk
 ./scripts/run-seat.sh            # seat UI + guest PWA
 ```
