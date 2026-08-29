@@ -237,6 +237,25 @@ The seat talks to Claude Code over **stream-json** (the same machine protocol
 the Agent SDK uses). Guests never see a TTY. The working directory is this
 repo (override with `BYOI_WORKSPACE`). Extra trees: `BYOI_ADD_DIR=/path:/other`.
 
+### Bash approval
+
+The seat's guest chat already has a real approval card — Claude Code sends a
+`can_use_tool` control request over the same stream-json channel, the seat
+turns it into a phone card (Allow / Deny), and the answer goes back the same
+way. That path works for whatever the CLI actually asks about.
+
+It does not cover everything, though: Claude Code's own Bash safety
+classifier denies some commands outright in headless mode — `npm run
+<script>` among them, since the script name could run anything — without
+ever asking. This happens identically under every permission mode, `manual`
+("ask every time") included, so there is no card to show; the CLI decided
+before the seat ever saw the request. `apps/seat/claude_chat.py`'s
+`DEFAULT_ALLOWED_TOOLS` pre-approves the shape of an ordinary build/test
+cycle (`npm run *`, `pytest`, `git status`/`diff`/`log`, …) so a guest
+following a brief doesn't hit that wall. Override it with `BYOI_CLAUDE_TOOLS`
+— set to `--allowedTools`'s own syntax to replace the list, or to `""` for a
+deliberately tighter guest sandbox with no default allowlist at all.
+
 ## Run
 
 ### On a salon PC (`static`)

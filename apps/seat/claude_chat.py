@@ -111,6 +111,25 @@ OPTIONAL_FLAGS = (
     "--prompt-suggestions",
 )
 
+# Claude Code's own Bash safety classifier denies some commands outright in
+# headless mode -- `npm run <script>` among them, since the script name could
+# run anything -- without ever asking over the control channel. Neither
+# acceptEdits nor manual/"ask every time" mode changes that; nothing on the
+# guest side can turn it into an approvable prompt. Pre-approving the shapes
+# of a normal build/test cycle here is what keeps a guest from hitting that
+# wall on an ordinary "npm run lint". Deliberately narrow: run/test/install
+# invocations, not anything that could touch the network or the filesystem
+# outside the project (no curl, no rm, no sudo).
+DEFAULT_ALLOWED_TOOLS = (
+    "Bash(npm run *) Bash(npm test) Bash(npm install) Bash(npm ci) "
+    "Bash(yarn *) Bash(pnpm *) Bash(bun run *) Bash(bun install) Bash(bun test) "
+    "Bash(git status) Bash(git diff *) Bash(git log *) Bash(git add *) "
+    "Bash(git commit *) Bash(git branch *) Bash(git show *) "
+    "Bash(pytest *) Bash(python -m pytest *) Bash(python3 -m pytest *) "
+    "Bash(pip install *) Bash(pip3 install *) "
+    "Bash(make *) Bash(cargo build *) Bash(cargo test *) Bash(go build *) Bash(go test *)"
+)
+
 
 @lru_cache(maxsize=4)
 def _help_text(binary: str) -> str:
@@ -147,8 +166,12 @@ def claude_argv() -> list[str]:
     ]
     argv.extend(f for f in OPTIONAL_FLAGS if supports_flag(binary, f))
     argv.extend(["--permission-mode", mode])
+    # Unset: the default build/test allowlist. Explicitly set, even to "": the
+    # operator's own choice, including a deliberately tighter guest sandbox.
     tools = os.environ.get("BYOI_CLAUDE_TOOLS")
-    if tools is not None and tools.strip():
+    if tools is None:
+        tools = DEFAULT_ALLOWED_TOOLS
+    if tools.strip():
         argv.extend(["--allowedTools", tools])
     extra = os.environ.get("BYOI_CLAUDE_EXTRA", "").strip()
     if extra:

@@ -528,6 +528,30 @@ def test_the_flags_that_make_it_a_chat_are_not_optional(monkeypatch):
         assert flag not in argv
 
 
+def test_a_guest_gets_the_default_build_test_allowlist(monkeypatch):
+    """Claude Code denies `npm run <script>` outright in headless mode, on any
+    permission mode, with no ask at all -- nothing on the guest side can turn
+    that into an approvable prompt. Pre-approving the normal build/test cycle
+    is what keeps a guest from hitting that wall on an ordinary `npm run lint`."""
+    monkeypatch.delenv("BYOI_CLAUDE_TOOLS", raising=False)
+    argv = claude_chat.claude_argv()
+    assert argv[argv.index("--allowedTools") + 1] == claude_chat.DEFAULT_ALLOWED_TOOLS
+    assert "Bash(npm run *)" in claude_chat.DEFAULT_ALLOWED_TOOLS
+
+
+def test_an_operator_set_allowlist_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("BYOI_CLAUDE_TOOLS", "Bash(ls *)")
+    argv = claude_chat.claude_argv()
+    assert argv[argv.index("--allowedTools") + 1] == "Bash(ls *)"
+
+
+def test_an_operator_can_explicitly_disable_the_default(monkeypatch):
+    """Empty is a deliberate choice -- a tighter guest sandbox -- not "unset"."""
+    monkeypatch.setenv("BYOI_CLAUDE_TOOLS", "")
+    argv = claude_chat.claude_argv()
+    assert "--allowedTools" not in argv
+
+
 def test_support_is_probed_from_the_binarys_own_help(monkeypatch):
     claude_chat._help_text.cache_clear()
     seen = []
