@@ -33,12 +33,15 @@ def test_health_and_seed_board(tmp_path: Path):
     assert {s["id"] for s in seats} >= {"seat-1", "seat-2", "seat-3"}
 
 
-def test_loopback_desk_does_not_need_bearer(tmp_path: Path):
-    """Same-machine operator at 127.0.0.1:8080 — no token paste."""
+def test_loopback_is_not_trusted(tmp_path: Path):
+    """A request that appears to come from 127.0.0.1 proves nothing.
+
+    The desk sits behind a reverse proxy, so that is what every guest request
+    looks like. Trusting it would hand the floor to the internet.
+    """
     desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
     res = desk.post("/api/board", json={"title": "Loopback brief", "brief": "from the desk PC"})
-    assert res.status_code == 200
-    assert res.json()["title"] == "Loopback brief"
+    assert res.status_code == 401
 
 
 def test_host_can_add_brief(tmp_path: Path):

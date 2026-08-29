@@ -8,7 +8,7 @@ from apps.seat.claude_chat import ClaudeChat
 
 
 def _desk(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    return TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
 
 
 def test_store_attaches_project(tmp_path: Path):

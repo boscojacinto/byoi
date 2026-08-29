@@ -1,0 +1,75 @@
+# The salon, on one VM. Seats are not listed here: the desk creates one per
+# check-in and destroys it at checkout (apps/api/seats.py).
+name: byoi
+
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+      args:
+        DNS_PLUGIN: ${BYOI_DNS_PLUGIN:-github.com/caddy-dns/cloudflare}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      BYOI_DOMAIN: ${BYOI_DOMAIN:?set BYOI_DOMAIN in deploy/.env}
+      BYOI_ACME_EMAIL: ${BYOI_ACME_EMAIL:?set BYOI_ACME_EMAIL in deploy/.env}
+      BYOI_DNS_PROVIDER: ${BYOI_DNS_PROVIDER:-cloudflare}
+      BYOI_DNS_API_TOKEN: ${BYOI_DNS_API_TOKEN:?set BYOI_DNS_API_TOKEN in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      # The admin socket. Shared with the desk and with nothing else — a seat
+      # that could reach it could route a hostname at itself.
+      - caddy-admin:/run/caddyadmin
+    networks:
+      - byoi-edge
+
+  desk:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.desk
+    container_name: byoi-desk
+    restart: unless-stopped
+    environment:
+      BYOI_DOMAIN: ${BYOI_DOMAIN}
+      BYOI_PUBLIC_BASE: https://${BYOI_DOMAIN}
+      BYOI_SALON_NAME: ${BYOI_SALON_NAME:-BYOI salon}
+      BYOI_SEAT_IMAGE: ${BYOI_SEAT_IMAGE:-byoi-seat:latest}
+      BYOI_MAX_SEATS: ${BYOI_MAX_SEATS:-4}
+      BYOI_SEATS: ondemand
+      # The PeriPage is Bluetooth and stayed at the counter.
+      BYOI_PRINT_MODE: relay
+      # Bind mounts are resolved by the daemon on the VM, so the desk has to
+      # know where its own /app/data actually lives out there.
+      BYOI_HOST_DATA_DIR: ${BYOI_HOST_DATA_DIR:?run scripts/cloud-up.sh, which sets this}
+      BYOI_CADDY_ADMIN: /run/caddyadmin/admin.sock
+      BYOI_EDGE_NETWORK: byoi-edge
+      BYOI_CONTROL_NETWORK: byoi-ctl
+    env_file:
+      # Deploy credentials (Vercel, Neon, Upstash). Desk only — the seat
+      # containers are built without them and never receive this file.
+      - path: ../.env
+        required: false
+    volumes:
+      - ../data:/app/data
+      - caddy-admin:/run/caddyadmin
+      # Raises seats, their Postgres and Redis, and the sandboxed grading runs.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - byoi-edge
+      - byoi-ctl
+
+networks:
+  byoi-edge:
+    name: byoi-edge
+  byoi-ctl:
+    name: byoi-ctl
+
+volumes:
+  caddy-data:
+  caddy-config:
+  caddy-admin:

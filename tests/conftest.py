@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from apps.api import seed_board
@@ -84,3 +86,22 @@ def _projects_in_tmp(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("projects")
     monkeypatch.setenv("BYOI_PROJECTS_DIR", str(root))
     (root / seed_board.SEED_PROJECT["slug"]).mkdir()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker(tmp_path_factory, monkeypatch):
+    """No test may drive the machine's real Docker.
+
+    Provisioning and grading both shell out to `docker`, and a test that
+    reaches the host daemon can pull images, start containers, and leave them
+    running. Tests that need one provide their own fake earlier on PATH.
+    """
+    blocker = tmp_path_factory.mktemp("no-docker")
+    stub = blocker / "docker"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'echo "refusing to reach the real docker daemon from a test" >&2\n'
+        "exit 127\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{blocker}:{os.environ['PATH']}")

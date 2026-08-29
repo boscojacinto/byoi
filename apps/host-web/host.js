@@ -1,8 +1,26 @@
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // The desk is on the public internet; a session can lapse mid-shift.
+    showSignIn();
+    throw new Error(data.detail || "sign in to the desk");
+  }
   if (!res.ok) throw new Error(data.detail || res.statusText);
   return data;
+}
+
+function showSignIn(hint) {
+  const gate = document.getElementById("signin");
+  if (!gate) return;
+  if (hint) document.getElementById("signinHint").textContent = hint;
+  gate.hidden = false;
+  document.getElementById("signinPw").focus();
+}
+
+function hideSignIn() {
+  const gate = document.getElementById("signin");
+  if (gate) gate.hidden = true;
 }
 
 const jsonHeaders = { "Content-Type": "application/json" };
@@ -79,6 +97,50 @@ function resetSitModal() {
   $("checkin").hidden = false;
   $("sitTitle").textContent = "Sit a guest";
   $("sitModal").querySelector(".modal-card").classList.remove("has-qr");
+}
+
+async function waitForSeat(started, msg, tries = 90) {
+  msg.textContent = "Raising the seat…";
+  for (let i = 0; i < tries; i += 1) {
+    const state = await api(started.poll);
+    if (state.state === "ready") {
+      msg.textContent = "";
+      showQrOnly();
+      return state;
+    }
+    if (state.state === "failed") {
+      throw new Error(state.error || "the seat did not come up");
+    }
+    await new Promise((done) => setTimeout(done, 1000));
+  }
+  throw new Error("the seat is taking longer than expected — check the desk log");
+}
+
+async function refreshPrinter() {
+  const pill = $("healthPrinter");
+  if (!pill) return;
+  try {
+    const p = await api("/api/print/status");
+    if (p.mode !== "relay") {
+      // The printer is on this machine; there is no relay to be offline.
+      pill.textContent = "Printer local";
+      pill.className = "pill";
+      return;
+    }
+    const waiting = (p.queued || 0) + (p.claimed || 0);
+    pill.textContent = p.online
+      ? waiting
+        ? `Printer · ${waiting} waiting`
+        : "Printer ok"
+      : "Printer offline";
+    pill.className = p.online ? "pill is-ok" : "pill is-bad";
+    pill.title = p.online
+      ? "the counter's relay is polling"
+      : "no relay at the counter — slips are queued, the QR is still on screen";
+  } catch (err) {
+    pill.textContent = "Printer?";
+    pill.className = "pill";
+  }
 }
 
 function showQrOnly() {
@@ -279,6 +341,7 @@ async function refresh() {
   $("healthBar").style.width = `${Math.max(12, pct)}%`;
   $("healthDesk").textContent = health.ok ? "Desk ok" : "Desk?";
   $("healthSeats").textContent = `${open.length}/${seats.length} open`;
+  await refreshPrinter();
 
   if (lastPane === "live") await refreshLive().catch(() => {});
 }
@@ -309,7 +372,7 @@ $("checkin").addEventListener("submit", async (ev) => {
   const msg = $("checkinMsg");
   msg.textContent = "Printing slip…";
   try {
-    await api("/api/sessions/check-in", {
+    const started = await api("/api/sessions/check-in", {
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({
@@ -317,7 +380,13 @@ $("checkin").addEventListener("submit", async (ev) => {
         coder_name: $("coderName").value,
       }),
     });
-    showQrOnly();
+    if (started.state === "preparing") {
+      // The seat is a container being raised right now. Showing the QR before
+      // it answers would hand the guest a code for an address that 404s.
+      await waitForSeat(started, msg);
+    } else {
+      showQrOnly();
+    }
     await refresh();
   } catch (err) {
     msg.textContent = err.message;
@@ -398,12 +467,52 @@ $("newProject").addEventListener("submit", async (ev) => {
   }
 });
 
-refresh().catch((err) => {
+$("signinForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const msg = $("signinMsg");
+  msg.textContent = "";
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ password: $("signinPw").value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    $("signinPw").value = "";
+    hideSignIn();
+    await boot();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+$("signOut").addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST" }).catch(() => {});
+  showSignIn("Signed out.");
+});
+
+async function boot() {
+  const session = await api("/api/session");
+  if (!session.signed_in) {
+    showSignIn(
+      session.password_set
+        ? "Sign in to open the floor."
+        : "No operator password yet — run scripts/salon-secrets.sh operator on the desk."
+    );
+    return;
+  }
+  hideSignIn();
+  await refresh();
+}
+
+boot().catch((err) => {
   $("checkinMsg").textContent = err.message;
 });
 setInterval(() => {
+  if (!$("signin").hidden) return;
   refresh().catch(() => {});
 }, 8000);
 setInterval(() => {
-  if (lastPane === "live") refreshLive().catch(() => {});
+  if (lastPane === "live" && $("signin").hidden) refreshLive().catch(() => {});
 }, 2000);

@@ -60,7 +60,7 @@ def test_complete_with_spec_runs_verifier(tmp_path: Path, monkeypatch):
         ],
     }
     monkeypatch.setattr("apps.api.seat_sync.verify_solution", lambda *a, **k: report)
-    desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    desk = TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
     brief = desk.post(
         "/api/board",
         json={"title": "QR", "brief": "scan", "spec": "- quiet zone\n- low light"},

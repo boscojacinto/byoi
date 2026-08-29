@@ -34,14 +34,22 @@ if [[ -n "$ACCOUNT" ]]; then
   mkdir -p "$CLAUDE_CONFIG_DIR"
   echo "On this seat PC, as the user who owns the seat agent:"
   echo
-  echo "  CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude setup-token"
+  echo "  CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude auth login --claudeai"
+  echo
+  echo "Then confirm it took — the pool ignores an account with no credentials:"
+  echo
+  echo "  CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude auth status"
+  echo
+  echo "Not 'claude setup-token'. That prints a token for you to export as"
+  echo "CLAUDE_CODE_OAUTH_TOKEN and writes nothing to CLAUDE_CONFIG_DIR, so the"
+  echo "account is left looking logged in while the pool sees it as empty."
   echo
   echo "Credential isolation is Linux-only (CLAUDE_CONFIG_DIR + .credentials.json)."
   echo "Add at least two --account logins so a usage limit can fail over in place."
 else
   echo "On this seat PC, as the user who owns the seat agent:"
   echo
-  echo "  claude setup-token"
+  echo "  claude auth login --claudeai"
   echo
   echo "Or a named spare under $POOL:"
   echo

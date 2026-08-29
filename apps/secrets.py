@@ -24,6 +24,9 @@ SECRETS: dict[str, str] = {
     "BYOI_NEON_API_KEY": "neon.token",
     "BYOI_UPSTASH_EMAIL": "upstash.email",
     "BYOI_UPSTASH_API_KEY": "upstash.token",
+    # Lets the venue's printer agent claim slips. Desk-only for the same
+    # reason the rest are: the seat runs guest code.
+    "BYOI_PRINT_RELAY_TOKEN": "print-relay.token",
 }
 
 

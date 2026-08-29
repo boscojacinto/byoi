@@ -1,0 +1,15 @@
+# The build context is the repo root. Without this the daemon is handed the
+# venv, every node_modules, and data/ — which holds the salon CA key, the
+# operator hash, and the deploy credentials.
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+.pytest_cache
+data
+deploy/.env
+.env
+*.db
+apps/guest/node_modules
+apps/templates/*/node_modules

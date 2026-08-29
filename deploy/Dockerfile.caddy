@@ -1,0 +1,13 @@
+# Caddy with a DNS provider plugin, which the wildcard certificate needs.
+# BYOI_DNS_PROVIDER in .env must match the module built in here.
+# 2.8.4 no longer builds from source: xcaddy resolves a zap/exp newer than the
+# zapslog.HandlerOptions API that release pins, and the compile fails.
+ARG CADDY_VERSION=2.10
+FROM caddy:${CADDY_VERSION}-builder AS builder
+ARG DNS_PLUGIN=github.com/caddy-dns/cloudflare
+RUN xcaddy build \
+    --with ${DNS_PLUGIN} \
+    --with github.com/mholt/caddy-ratelimit
+
+FROM caddy:${CADDY_VERSION}
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

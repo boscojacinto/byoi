@@ -49,6 +49,25 @@ def _client() -> httpx.Client:
     return httpx.Client(verify=host_ssl_context(), timeout=timeout)
 
 
+def seat_status(seat: dict[str, Any] | None, *, timeout: float = 3.0) -> dict[str, Any]:
+    """Readiness probe for a freshly raised seat.
+
+    Deliberately over the mTLS port rather than the guest one: an answer here
+    proves the app is up *and* that it loaded the certificate the desk just
+    minted for it, which is everything that has to be true before an OTP is
+    pushed.
+    """
+    url = control_base(seat) + "/local/control-health"
+    try:
+        with httpx.Client(verify=host_ssl_context(), timeout=timeout) as client:
+            res = client.get(url)
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {"ok": True}
+
+
 def admit_session(seat: dict[str, Any], sess: dict[str, Any]) -> dict[str, Any]:
     url = control_base(seat) + "/local/admit"
     payload = {
@@ -108,6 +127,26 @@ def infra_up(
     try:
         with httpx.Client(verify=host_ssl_context(), timeout=300.0) as client:
             res = client.post(url, json={"session_id": session_id, "cwd": cwd}, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise SeatSyncError(0, str(exc)) from exc
+    if res.status_code >= 400:
+        raise SeatSyncError(res.status_code, res.text)
+    return res.json() if res.content else {}
+
+
+def push_infra_env(
+    seat: dict[str, Any] | None,
+    *,
+    session_id: str,
+    env: dict[str, str],
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    """Hand a cloud seat the URLs for the stack the desk raised for it."""
+    url = control_base(seat) + "/local/infra/env"
+    payload = {"session_id": session_id, "env": env, "cwd": cwd}
+    try:
+        with _client() as client:
+            res = client.post(url, json=payload, headers=_headers())
     except httpx.HTTPError as exc:
         raise SeatSyncError(0, str(exc)) from exc
     if res.status_code >= 400:

@@ -315,3 +315,55 @@ form button, .checkin button[type="submit"] {
   nav { margin-left: 0; }
   .top { flex-wrap: wrap; }
 }
+
+/* Desk sign-in. The desk is reachable from the internet, so the floor is
+   behind a password rather than behind being physically at the counter. */
+.signin {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 10, 8, 0.92);
+  backdrop-filter: blur(6px);
+}
+.signin[hidden] { display: none; }
+.signin-card {
+  width: min(360px, calc(100vw - 3rem));
+  display: grid;
+  gap: 0.75rem;
+  padding: 1.75rem;
+  border: 1px solid rgba(61, 255, 138, 0.28);
+  border-radius: 14px;
+  background: #0c120e;
+}
+.signin-card h1 { margin: 0; font-size: 1.25rem; }
+.signin-card input {
+  padding: 0.6rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: #070b08;
+  color: inherit;
+  font: inherit;
+}
+.signin-card button {
+  padding: 0.6rem;
+  border: 0;
+  border-radius: 8px;
+  background: #3dff8a;
+  color: #06120b;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Footer status pills. The printer one matters most: it is the only part of
+   the salon that stayed in the room. */
+.health .pill {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  font-size: 0.8rem;
+}
+.health .pill.is-ok { border-color: rgba(61, 255, 138, 0.5); color: #3dff8a; }
+.health .pill.is-bad { border-color: rgba(255, 122, 122, 0.6); color: #ff9d9d; }

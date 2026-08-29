@@ -1,0 +1,55 @@
+# Public edge for the salon. Everything a guest or the operator touches is
+# terminated here with a real certificate, so the private salon CA is left
+# doing only what it is good at: identifying the desk to a seat.
+{
+	email {$BYOI_ACME_EMAIL}
+
+	# The desk adds and removes a route per session. A TCP admin port would be
+	# reachable from the seat containers on byoi-edge, and the guest's Claude
+	# has a shell — so the admin API is a unix socket on a volume only the desk
+	# and Caddy share.
+	admin unix//run/caddyadmin/admin.sock
+}
+
+(guard) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+}
+
+# One wildcard certificate, issued over DNS-01, covers every session hostname.
+# The alternative — on-demand TLS — mints a certificate per visit and walks
+# into Let's Encrypt's rate limits on a busy Saturday.
+*.{$BYOI_DOMAIN} {
+	tls {
+		dns {$BYOI_DNS_PROVIDER} {$BYOI_DNS_API_TOKEN}
+	}
+	import guard
+
+	# Seat routes are injected here by the desk at check-in and removed at
+	# checkout. Until then an unknown session name is simply not a seat.
+	respond "no session on this address" 404
+}
+
+{$BYOI_DOMAIN} {
+	tls {
+		dns {$BYOI_DNS_PROVIDER} {$BYOI_DNS_API_TOKEN}
+	}
+	import guard
+
+	# The desk password and the seat OTP are both online guesses now.
+	# Server-side lockouts are the real control; this only slows the flood.
+	@sensitive path /api/login /join /local/unlock
+	rate_limit @sensitive {
+		zone salon_sensitive {
+			key {remote_host}
+			events 20
+			window 1m
+		}
+	}
+
+	reverse_proxy byoi-desk:8080
+}

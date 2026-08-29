@@ -180,3 +180,45 @@ def test_revoke_drops_otp():
     control.post("/local/revoke", headers=HOST)
     assert guest.get("/local/status").json()["admitted"] is False
     assert guest.post("/local/unlock", json={"otp": "cafebabe"}).status_code == 403
+
+
+def test_public_mode_drops_the_address_check(monkeypatch):
+    """A seat container behind the cloud proxy sees the proxy, not the guest.
+
+    An address test there would pass for everybody, so ``public`` removes it
+    outright rather than leaving a control that is not one.
+    """
+    monkeypatch.setenv("BYOI_GUEST_NET", "public")
+    assert client_allowed("8.8.8.8") is True
+    assert client_allowed(None) is True
+    assert client_allowed("203.0.113.9", lan_cidr="192.168.1.0/24") is True
+
+
+def test_public_mode_still_needs_the_otp(monkeypatch):
+    """Opening the network does not open the seat."""
+    monkeypatch.setenv("BYOI_GUEST_NET", "public")
+    gate.reset()
+    client = TestClient(app)
+    assert client.post("/local/unlock", json={"otp": "nope"}).status_code == 403
+    gate.admit(otp="deadbeef", session_id="s1", coder_name="Ada", seat_id="seat-1")
+    assert client.post("/local/unlock", json={"otp": "wrong"}).status_code == 403
+    ok = client.post("/local/unlock", json={"otp": "deadbeef"})
+    assert ok.status_code == 200
+    assert ok.json()["ticket"]
+
+
+def test_public_mode_still_locks_out_after_enough_failures(monkeypatch):
+    monkeypatch.setenv("BYOI_GUEST_NET", "public")
+    gate.reset()
+    gate.admit(otp="deadbeef", session_id="s1", coder_name="Ada", seat_id="seat-1")
+    client = TestClient(app)
+    for _ in range(gate.max_failures):
+        assert client.post("/local/unlock", json={"otp": "wrong"}).status_code == 403
+    locked = client.post("/local/unlock", json={"otp": "deadbeef"})
+    assert locked.status_code == 403
+    assert "host must check you in" in locked.json()["detail"]
+
+
+def test_lan_stays_the_default(monkeypatch):
+    monkeypatch.delenv("BYOI_GUEST_NET", raising=False)
+    assert client_allowed("8.8.8.8") is False

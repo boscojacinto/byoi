@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -44,6 +45,12 @@ class SubmitIn(BaseModel):
 
 class InfraIn(BaseModel):
     session_id: str
+    cwd: str | None = None
+
+
+class InfraEnvIn(BaseModel):
+    session_id: str
+    env: dict[str, str]
     cwd: str | None = None
 
 
@@ -227,6 +234,34 @@ def infra_up(request: Request, body: InfraIn, authorization: str | None = Header
     except InfraError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "seat_id": SEAT_ID, "cwd": cwd, "env": public_env(env)}
+
+
+@app.post("/local/infra/env")
+def infra_env(request: Request, body: InfraEnvIn, authorization: str | None = Header(default=None)) -> dict:
+    """Write URLs for a stack the *desk* raised into the project's .env.local.
+
+    The seat has no Docker and cannot start these containers — see
+    apps/api/infra.py for why. What it still owns is the file: only the salon's
+    managed block is rewritten, so a guest's own variables survive.
+    """
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+    from .infra import public_env, write_env_file
+
+    cwd = body.cwd or (str(chat_session.workspace_path) if chat_session.workspace_path else None)
+    if not cwd:
+        raise HTTPException(409, "seat has no workspace for this session")
+    project_dir = Path(cwd).expanduser()
+    if not project_dir.is_dir():
+        raise HTTPException(409, f"not a directory: {project_dir}")
+    written = write_env_file(project_dir, body.env)
+    return {
+        "ok": True,
+        "seat_id": SEAT_ID,
+        "cwd": str(project_dir),
+        "env_file": str(written),
+        "env": public_env(body.env),
+    }
 
 
 @app.post("/local/infra/down")

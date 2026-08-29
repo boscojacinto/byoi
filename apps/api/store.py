@@ -20,7 +20,13 @@ CREATE TABLE IF NOT EXISTS seats (
     pan_ssid TEXT NOT NULL,
     pan_cidr TEXT NOT NULL DEFAULT '192.168.44.0/24',
     agent_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:8787',
-    status TEXT NOT NULL DEFAULT 'idle'
+    status TEXT NOT NULL DEFAULT 'idle',
+    -- A chair is a place in the room. The container that serves it is raised at
+    -- check-in and destroyed at checkout, so everything below is per-visit.
+    container_id TEXT,
+    public_host TEXT,
+    state TEXT NOT NULL DEFAULT 'idle',
+    error TEXT
 );
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -53,6 +59,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     rc_url TEXT,
     test_status TEXT,
     test_report TEXT,
+    account_labels TEXT NOT NULL DEFAULT '[]',
     FOREIGN KEY (seat_id) REFERENCES seats(id)
 );
 CREATE TABLE IF NOT EXISTS deployments (
@@ -78,7 +85,13 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     kind TEXT NOT NULL,
     payload TEXT NOT NULL,
     created_at REAL NOT NULL,
-    dumped_path TEXT
+    dumped_path TEXT,
+    -- The printer is Bluetooth, so it stays at the counter while the desk is in
+    -- the cloud. A relay at the venue claims jobs from here.
+    status TEXT NOT NULL DEFAULT 'done',
+    claimed_at REAL,
+    finished_at REAL,
+    error TEXT
 );
 """
 
@@ -119,6 +132,28 @@ class Store:
             self.conn.execute("ALTER TABLE sessions ADD COLUMN test_status TEXT")
         if "test_report" not in sess_cols:
             self.conn.execute("ALTER TABLE sessions ADD COLUMN test_report TEXT")
+        if "account_labels" not in sess_cols:
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN account_labels TEXT NOT NULL DEFAULT '[]'"
+            )
+        print_cols = self._columns("print_jobs")
+        for column, ddl in (
+            ("status", "ALTER TABLE print_jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"),
+            ("claimed_at", "ALTER TABLE print_jobs ADD COLUMN claimed_at REAL"),
+            ("finished_at", "ALTER TABLE print_jobs ADD COLUMN finished_at REAL"),
+            ("error", "ALTER TABLE print_jobs ADD COLUMN error TEXT"),
+        ):
+            if column not in print_cols:
+                self.conn.execute(ddl)
+        seat_cols = self._columns("seats")
+        for column, ddl in (
+            ("container_id", "ALTER TABLE seats ADD COLUMN container_id TEXT"),
+            ("public_host", "ALTER TABLE seats ADD COLUMN public_host TEXT"),
+            ("state", "ALTER TABLE seats ADD COLUMN state TEXT NOT NULL DEFAULT 'idle'"),
+            ("error", "ALTER TABLE seats ADD COLUMN error TEXT"),
+        ):
+            if column not in seat_cols:
+                self.conn.execute(ddl)
         self.conn.commit()
 
     def _seed(self) -> None:
@@ -210,7 +245,8 @@ class Store:
         """Seat status follows live sessions so a finished visit cannot stick as occupied."""
         self.conn.execute(
             """
-            UPDATE seats SET status='idle'
+            UPDATE seats SET status='idle', state='idle', container_id=NULL,
+                             public_host=NULL, error=NULL
             WHERE id NOT IN (
                 SELECT seat_id FROM sessions WHERE status IN ('checked_in','active')
             )
@@ -260,6 +296,12 @@ class Store:
                 item["test_report"] = json.loads(raw)
             except json.JSONDecodeError:
                 pass
+        labels = item.get("account_labels")
+        if isinstance(labels, str):
+            try:
+                item["account_labels"] = json.loads(labels or "[]")
+            except json.JSONDecodeError:
+                item["account_labels"] = []
         return item
 
     def _with_project(self, item: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -392,6 +434,80 @@ class Store:
         self.conn.execute("UPDATE seats SET status='occupied' WHERE id=?", (seat_id,))
         self.conn.commit()
         return sess
+
+    def set_seat_runtime(
+        self,
+        seat_id: str,
+        *,
+        state: str,
+        agent_url: str | None = None,
+        container_id: str | None = None,
+        public_host: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Record what is currently serving this chair.
+
+        ``agent_url`` is the container's address on the internal network, which
+        is also where ``seat_sync.control_base`` derives the mTLS control URL
+        from — so a chair with no container has nothing to talk to, by
+        construction rather than by a stale default.
+        """
+        sets = ["state=?"]
+        args: list[Any] = [state]
+        for column, value in (
+            ("agent_url", agent_url),
+            ("container_id", container_id),
+            ("public_host", public_host),
+        ):
+            if value is not None:
+                sets.append(f"{column}=?")
+                args.append(value)
+        sets.append("error=?")
+        args.append(error)
+        args.append(seat_id)
+        self.conn.execute(f"UPDATE seats SET {', '.join(sets)} WHERE id=?", args)
+        self.conn.commit()
+        return self.seat(seat_id)
+
+    def clear_seat_runtime(self, seat_id: str) -> None:
+        self.conn.execute(
+            "UPDATE seats SET state='idle', container_id=NULL, public_host=NULL, error=NULL "
+            "WHERE id=?",
+            (seat_id,),
+        )
+        self.conn.commit()
+
+    def set_session_accounts(self, session_id: str, labels: list[str]) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET account_labels=? WHERE id=?",
+            (json.dumps(labels), session_id),
+        )
+        self.conn.commit()
+
+    def accounts_in_use(self, *, excluding: str | None = None) -> set[str]:
+        """Labels held by other live visits.
+
+        Two Claude Code processes pointed at one credential directory tread on
+        each other, so an account is handed to at most one seat at a time.
+        """
+        rows = self.conn.execute(
+            "SELECT id, account_labels FROM sessions WHERE status IN ('checked_in','active')"
+        ).fetchall()
+        held: set[str] = set()
+        for row in rows:
+            if excluding and row["id"] == excluding:
+                continue
+            try:
+                held.update(json.loads(row["account_labels"] or "[]"))
+            except ValueError:
+                continue
+        return held
+
+    def live_sessions(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE status IN ('checked_in','active')"
+        ).fetchall()
+        return [self._session_dict(row) for row in rows if row]  # type: ignore[misc]
 
     def claim(self, session_id: str, board_id: str) -> dict[str, Any]:
         item = self.board_item(board_id)
@@ -565,6 +681,79 @@ class Store:
     def set_rc_url(self, session_id: str, url: str) -> None:
         self.conn.execute("UPDATE sessions SET rc_url=? WHERE id=?", (url, session_id))
         self.conn.commit()
+
+    def enqueue_print(self, kind: str, payload: dict[str, Any], png_path: str | None) -> str:
+        """Queue a slip for the relay at the venue to claim and print."""
+        job_id = str(uuid.uuid4())[:10]
+        self.conn.execute(
+            "INSERT INTO print_jobs (id, kind, payload, created_at, dumped_path, status) "
+            "VALUES (?,?,?,?,?,'queued')",
+            (job_id, kind, json.dumps(payload), time.time(), png_path),
+        )
+        self.conn.commit()
+        return job_id
+
+    def claim_print_job(self, *, stale_after: float = 120.0) -> dict[str, Any] | None:
+        """Hand the oldest waiting slip to the relay.
+
+        A claim that is never finished is handed out again: the relay is a
+        laptop at a counter and it will be closed, lose Wi-Fi, and be reopened.
+        Reprinting a slip is cheap; silently never printing one is not.
+        """
+        cutoff = time.time() - stale_after
+        row = self.conn.execute(
+            "SELECT * FROM print_jobs WHERE status='queued' "
+            "   OR (status='claimed' AND COALESCE(claimed_at, 0) < ?) "
+            "ORDER BY created_at LIMIT 1",
+            (cutoff,),
+        ).fetchone()
+        if not row:
+            return None
+        self.conn.execute(
+            "UPDATE print_jobs SET status='claimed', claimed_at=? WHERE id=?",
+            (time.time(), row["id"]),
+        )
+        self.conn.commit()
+        return self.print_job(row["id"])
+
+    def set_print_png(self, job_id: str, png_path: str) -> None:
+        self.conn.execute("UPDATE print_jobs SET dumped_path=? WHERE id=?", (png_path, job_id))
+        self.conn.commit()
+
+    def print_job(self, job_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM print_jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item.get("payload") or "{}")
+        except json.JSONDecodeError:
+            item["payload"] = {}
+        return item
+
+    def finish_print_job(self, job_id: str, *, ok: bool, error: str | None = None) -> dict[str, Any] | None:
+        self.conn.execute(
+            "UPDATE print_jobs SET status=?, finished_at=?, error=? WHERE id=?",
+            ("done" if ok else "failed", time.time(), None if ok else (error or "print failed"), job_id),
+        )
+        self.conn.commit()
+        return self.print_job(job_id)
+
+    def print_queue(self) -> dict[str, Any]:
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM print_jobs GROUP BY status"
+        ).fetchall()
+        counts = {row["status"]: row["n"] for row in rows}
+        last = self.conn.execute(
+            "SELECT id, status, created_at, finished_at, error FROM print_jobs "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        return {
+            "queued": counts.get("queued", 0),
+            "claimed": counts.get("claimed", 0),
+            "failed": counts.get("failed", 0),
+            "last": dict(last) if last else None,
+        }
 
     def log_print(self, kind: str, payload: dict[str, Any], dumped_path: str | None) -> str:
         job_id = str(uuid.uuid4())[:10]

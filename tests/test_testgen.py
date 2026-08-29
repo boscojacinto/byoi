@@ -299,7 +299,7 @@ def test_complete_falls_back_to_seat_and_says_why(tmp_path: Path, monkeypatch):
         lambda *a, **k: {"summary": "seat graded it", "passed": 1, "failed": 0,
                          "cases": [{"name": "quiet zone", "pass": True, "detail": ""}]},
     )
-    desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    desk = TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
     brief = desk.post("/api/board", json={"title": "QR", "brief": "scan", "spec": "- quiet zone"}).json()
     sid = desk.post("/api/sessions/check-in",
                     json={"seat_id": "seat-1", "coder_name": "Ada"}).json()["session"]["id"]
@@ -320,7 +320,7 @@ def test_an_unexpected_host_failure_still_produces_a_report(tmp_path: Path, monk
         "apps.api.seat_sync.verify_solution",
         lambda *a, **k: {"summary": "seat graded it", "passed": 1, "failed": 0, "cases": []},
     )
-    desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    desk = TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
     brief = desk.post("/api/board", json={"title": "QR", "brief": "scan", "spec": "- quiet zone"}).json()
     sid = desk.post("/api/sessions/check-in",
                     json={"seat_id": "seat-1", "coder_name": "Ada"}).json()["session"]["id"]
@@ -338,7 +338,7 @@ def test_a_total_failure_still_produces_a_report(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("apps.api.seat_sync.submit_solution", boom)
     monkeypatch.setattr("apps.api.seat_sync.verify_solution", boom)
-    desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
+    desk = TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
     brief = desk.post("/api/board", json={"title": "QR", "brief": "scan", "spec": "- quiet zone"}).json()
     sid = desk.post("/api/sessions/check-in",
                     json={"seat_id": "seat-1", "coder_name": "Ada"}).json()["session"]["id"]
