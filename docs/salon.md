@@ -162,6 +162,22 @@ Check-in **fails** if the seat control port does not accept the desk's client
 cert. Set `BYOI_SEAT_CONTROL_URL` to the seat's current IP when the machines
 are separate; you do not reissue certs when DHCP changes.
 
+## The default board
+
+A fresh `salon.db` opens with the fixes waiting on **The Fusion Studio** site
+(`https://github.com/boscojacinto/thefusionstudio`), each with an acceptance
+spec. They live in [`apps/api/seed_board.py`](../apps/api/seed_board.py) — edit
+the briefs there, bump `SEED_VERSION`, and the next desk start publishes them.
+
+Re-seeding never touches a brief the host wrote. A previous default is deleted
+if no visit ever claimed it, and unpublished (so the visit still reads) if one
+did.
+
+The repo is cloned lazily: the folder appears the first time a guest claims one
+of these briefs, or when the host taps **Fetch repo** in *New solution* to get
+it out of the way before the doors open. Nothing on the desk touches the
+network at startup.
+
 ## Projects on the solution board
 
 Each brief can point at a **git project**. When the guest claims it, the seat

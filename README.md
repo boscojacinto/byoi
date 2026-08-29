@@ -159,6 +159,11 @@ or a folder on this PC). Claiming it sets the seat workspace to that folder.
 An optional **acceptance spec** runs when the guest taps **I'm done** — the
 seat grades the work and the phone shows pass/fail.
 
+The board a fresh desk opens with is `apps/api/seed_board.py` — today, the
+fixes waiting on [The Fusion Studio](https://github.com/boscojacinto/thefusionstudio)
+site. That repo is cloned on the first claim (or from the desk's **Fetch repo**
+button), so startup stays offline.
+
 `gh auth login` once if you create GitHub repos from the desk. New clones
 land in `data/projects/`. Phone browsers warn on the salon CA until
 `https://<seat-ip>:8787/ca.pem` is installed.

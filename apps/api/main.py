@@ -159,6 +159,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def get_templates() -> dict:
         return {"templates": project_ops.templates()}
 
+    @app.post("/api/projects/{project_id}/fetch")
+    def fetch_project(
+        request: Request, project_id: str, authorization: str | None = Header(default=None)
+    ) -> dict:
+        """Clone the folder now, so the first guest of the day does not wait on git."""
+        require_host(request, authorization)
+        project = store.project(project_id)
+        if not project:
+            raise HTTPException(404, "unknown project")
+        try:
+            local_path = project_ops.ensure_local(project)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {"project": project, "local_path": local_path}
+
     @app.post("/api/board/{board_id}/project")
     def assign_project(
         request: Request,
@@ -280,6 +297,12 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         path = (project or {}).get("local_path") if project else None
         needs: list[str] = []
         if path:
+            try:
+                path = project_ops.ensure_local(project)
+            except FileNotFoundError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(502, f"could not fetch this project: {exc}") from exc
             seat = store.seat(sess["seat_id"])
             try:
                 seat_sync.set_workspace(seat, path)

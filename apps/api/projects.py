@@ -79,6 +79,34 @@ def clone_url(url: str, name: str | None = None) -> dict[str, str | None]:
     return {"name": folder, "local_path": str(dest), "github": src}
 
 
+def ensure_local(project: dict[str, object]) -> str:
+    """Make the project's folder real. Clones from GitHub the first time.
+
+    The default board ships with a repo nobody has cloned yet, so the folder
+    appears when a guest claims the brief (or when the host taps Fetch), not
+    when the desk starts up offline.
+    """
+    raw = str(project.get("local_path") or "").strip()
+    if not raw:
+        raise FileNotFoundError("this project has no folder")
+    dest = Path(raw).expanduser()
+    if dest.is_dir():
+        return str(dest.resolve())
+    url = str(project.get("github") or "").strip()
+    if not url:
+        raise FileNotFoundError(f"folder is gone and there is no repo to clone: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _run(["git", "clone", url, str(dest)], timeout=600)
+    except FileNotFoundError as exc:
+        raise RuntimeError("git is not on PATH") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError((exc.stderr or exc.stdout or "git clone failed").strip()) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"cloning {url} timed out") from exc
+    return str(dest.resolve())
+
+
 def create_github(*, name: str, description: str = "", private: bool = True) -> dict[str, str | None]:
     repo = (name or "").strip().lstrip("@")
     folder = slug(repo)

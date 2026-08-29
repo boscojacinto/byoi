@@ -1,5 +1,6 @@
 import pytest
 
+from apps.api import seed_board
 from apps.api.seat_sync import SeatSyncError
 from apps.seat.claude_chat import session as chat_session
 from apps.seat.gate import gate
@@ -75,3 +76,11 @@ def _isolate_host_token(monkeypatch):
 def _isolate_claude_accounts(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("BYOI_CLAUDE_ACCOUNTS_DIR", str(tmp_path_factory.mktemp("claude-accounts")))
     monkeypatch.setenv("BYOI_HANDOFFS_DIR", str(tmp_path_factory.mktemp("handoffs")))
+
+
+@pytest.fixture(autouse=True)
+def _projects_in_tmp(tmp_path_factory, monkeypatch):
+    """The seeded board points at a real repo. Give it a folder so no test clones."""
+    root = tmp_path_factory.mktemp("projects")
+    monkeypatch.setenv("BYOI_PROJECTS_DIR", str(root))
+    (root / seed_board.SEED_PROJECT["slug"]).mkdir()

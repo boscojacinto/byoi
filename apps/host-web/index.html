@@ -87,7 +87,11 @@
         <input name="title" placeholder="Title" required />
         <textarea name="brief" placeholder="What done looks like" required></textarea>
         <textarea name="spec" placeholder="How we’ll know it works (optional)"></textarea>
-        <select name="project_id" id="projectSel"><option value="">Project</option></select>
+        <div class="row">
+          <select name="project_id" id="projectSel"><option value="">Project</option></select>
+          <button type="button" class="text" id="fetchProject">Fetch repo</button>
+        </div>
+        <p id="fetchMsg" class="quiet"></p>
         <div class="row">
           <label>Minutes <input type="number" name="wellness_minutes" value="90" min="15" /></label>
           <label>Break <input type="number" name="break_after" value="50" min="10" /></label>

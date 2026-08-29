@@ -353,6 +353,22 @@ $("freeAll").addEventListener("click", async () => {
   }
 });
 
+$("fetchProject").addEventListener("click", async () => {
+  const id = $("projectSel").value;
+  const msg = $("fetchMsg");
+  if (!id) {
+    msg.textContent = "Pick a project first.";
+    return;
+  }
+  msg.textContent = "Cloning…";
+  try {
+    const res = await api(`/api/projects/${id}/fetch`, { method: "POST", headers: jsonHeaders });
+    msg.textContent = `Ready at ${res.local_path}`;
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
 $("newProject").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);

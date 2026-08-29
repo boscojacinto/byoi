@@ -194,3 +194,80 @@ def test_from_template_commits_the_starter(tmp_path, monkeypatch):
         ["git", "status", "--porcelain"], cwd=made["local_path"], capture_output=True, text=True
     )
     assert status.stdout.strip() == ""
+
+def _fake_clone(monkeypatch, dest: Path, calls: list):
+    def fake_run(argv, *, cwd=None, timeout=180):
+        if argv[:2] == ["git", "clone"]:
+            calls.append(argv[2])
+            Path(argv[3]).mkdir(parents=True)
+            (Path(argv[3]) / "README.md").write_text("# site\n")
+
+            class R:
+                stdout = ""
+                stderr = ""
+
+            return R()
+        raise AssertionError(argv)
+
+    monkeypatch.setattr("apps.api.projects._run", fake_run)
+
+
+def test_claim_clones_a_project_that_is_not_on_disk(tmp_path: Path, monkeypatch):
+    """The seeded board points at a repo nobody has cloned yet."""
+    desk = _desk(tmp_path)
+    store = Store(tmp_path / "salon.db")
+    dest = tmp_path / "projects" / "site"
+    proj = store.add_project(name="site", local_path=str(dest), github="https://example.test/site.git")
+    brief = store.add_board("Fix the ticker", "list the services", 60, 40, project_id=proj["id"])
+    calls: list = []
+    _fake_clone(monkeypatch, dest, calls)
+    seen: list = []
+    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: seen.append(path) or {"ok": True})
+
+    sid = desk.post("/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}).json()["session"]["id"]
+    res = desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
+
+    assert res.status_code == 200
+    assert calls == ["https://example.test/site.git"]
+    assert seen == [str(dest.resolve())]
+
+
+def test_host_can_fetch_a_project_before_the_doors_open(tmp_path: Path, monkeypatch):
+    desk = _desk(tmp_path)
+    store = Store(tmp_path / "salon.db")
+    dest = tmp_path / "projects" / "site"
+    proj = store.add_project(name="site", local_path=str(dest), github="https://example.test/site.git")
+    calls: list = []
+    _fake_clone(monkeypatch, dest, calls)
+
+    first = desk.post(f"/api/projects/{proj['id']}/fetch")
+    assert first.status_code == 200
+    assert first.json()["local_path"] == str(dest.resolve())
+    # Second tap is a no-op: the folder is already there.
+    assert desk.post(f"/api/projects/{proj['id']}/fetch").status_code == 200
+    assert calls == ["https://example.test/site.git"]
+
+
+def test_fetch_reports_a_failed_clone(tmp_path: Path, monkeypatch):
+    import subprocess
+
+    desk = _desk(tmp_path)
+    store = Store(tmp_path / "salon.db")
+    proj = store.add_project(
+        name="site", local_path=str(tmp_path / "gone"), github="https://example.test/site.git"
+    )
+
+    def boom(argv, *, cwd=None, timeout=180):
+        raise subprocess.CalledProcessError(128, argv, output="", stderr="repository not found")
+
+    monkeypatch.setattr("apps.api.projects._run", boom)
+    res = desk.post(f"/api/projects/{proj['id']}/fetch")
+    assert res.status_code == 502
+    assert "repository not found" in res.json()["detail"]
+
+
+def test_fetch_needs_a_repo_when_the_folder_is_gone(tmp_path: Path):
+    desk = _desk(tmp_path)
+    store = Store(tmp_path / "salon.db")
+    proj = store.add_project(name="site", local_path=str(tmp_path / "gone"))
+    assert desk.post(f"/api/projects/{proj['id']}/fetch").status_code == 404

@@ -9,6 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from . import seed_board
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seats (
@@ -67,6 +69,10 @@ CREATE TABLE IF NOT EXISTS deployments (
     torn_down_at REAL,
     FOREIGN KEY (session_id) REFERENCES sessions (id)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS print_jobs (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -80,27 +86,6 @@ SEED_SEATS = [
     ("seat-1", "Seat 1 — Window", "claude-seat-1", "salon Wi-Fi"),
     ("seat-2", "Seat 2 — Fern", "claude-seat-2", "salon Wi-Fi"),
     ("seat-3", "Seat 3 — Booth", "claude-seat-3", "salon Wi-Fi"),
-]
-
-SEED_BOARD = [
-    (
-        "Fix the PeriPage QR slip so it scans in low cafe light",
-        "Harden contrast and quiet-zone on the check-in QR printed by the A6 304dpi. Ship a before/after dump.",
-        60,
-        40,
-    ),
-    (
-        "Join guide that a first-time Android guest can follow on cafe Wi-Fi",
-        "Rewrite the guest PWA so a phone on the same Wi-Fi as the seat PC can scan the slip and chat with Claude Code.",
-        75,
-        45,
-    ),
-    (
-        "Wellness break chime that cannot be skipped from the seat",
-        "After the session timer, lock unlock() until the host taps resume. Print the break on the slip.",
-        90,
-        50,
-    ),
 ]
 
 
@@ -144,16 +129,74 @@ class Store:
                     "INSERT INTO seats (id, name, claude_label, pan_ssid) VALUES (?,?,?,?)",
                     (sid, name, label, ssid),
                 )
-        n = self.conn.execute("SELECT COUNT(*) FROM board").fetchone()[0]
-        if n == 0:
-            now = time.time()
-            for title, brief, wellness, brk in SEED_BOARD:
-                self.conn.execute(
-                    "INSERT INTO board (id, title, brief, wellness_minutes, break_after, published, created_at) "
-                    "VALUES (?,?,?,?,?,1,?)",
-                    (str(uuid.uuid4())[:8], title, brief, wellness, brk, now),
-                )
+        self._seed_board()
         self.conn.commit()
+
+    def _meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+    def _seed_project_id(self) -> str:
+        """One project row for the site the default board works on."""
+        github = seed_board.SEED_PROJECT["github"]
+        row = self.conn.execute("SELECT id FROM projects WHERE github=?", (github,)).fetchone()
+        if row:
+            return row["id"]
+        from .projects import projects_root
+
+        local = projects_root() / seed_board.SEED_PROJECT["slug"]
+        made = self.add_project(
+            name=seed_board.SEED_PROJECT["name"], local_path=str(local), github=github
+        )
+        return made["id"]
+
+    def _retire_defaults(self) -> None:
+        """Take an earlier default off the board without erasing a past visit."""
+        rows = self.conn.execute(
+            "SELECT id FROM board WHERE id LIKE 'seed-%' OR title IN ({})".format(
+                ",".join("?" * len(seed_board.LEGACY_TITLES)) or "''"
+            ),
+            tuple(seed_board.LEGACY_TITLES),
+        ).fetchall()
+        for row in rows:
+            used = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE board_id=? LIMIT 1", (row["id"],)
+            ).fetchone()
+            if used:
+                self.conn.execute("UPDATE board SET published=0 WHERE id=?", (row["id"],))
+            else:
+                self.conn.execute("DELETE FROM board WHERE id=?", (row["id"],))
+
+    def _seed_board(self) -> None:
+        """Publish apps/api/seed_board.py. Host-written briefs are left alone."""
+        if self._meta("board_seed") == seed_board.SEED_VERSION:
+            return
+        project_id = self._seed_project_id()
+        self._retire_defaults()
+        now = time.time()
+        for offset, item in enumerate(seed_board.SEED_BOARD):
+            self.conn.execute(
+                "INSERT INTO board (id, title, brief, wellness_minutes, break_after, "
+                "published, created_at, project_id, spec) VALUES (?,?,?,?,?,1,?,?,?)",
+                (
+                    f"{item['id']}@{seed_board.SEED_VERSION}",
+                    item["title"],
+                    item["brief"],
+                    item["wellness_minutes"],
+                    item["break_after"],
+                    now - offset,
+                    project_id,
+                    item["spec"],
+                ),
+            )
+        self._set_meta("board_seed", seed_board.SEED_VERSION)
 
     def _live_session(self, seat_id: str) -> dict[str, Any] | None:
         row = self.conn.execute(
