@@ -8,6 +8,11 @@ ESC/POS printer. Current units talk a proprietary session over **Bluetooth
 LE**, and print a 576-pixel-wide 1-bit raster. This tree implements that
 protocol. It does **not** target the older 203dpi A6 (384 px).
 
+The same tree also runs the **BYOI salon**, which is what that printer prints
+for: a cafe floor where a guest sits down, scans a slip, and codes through
+Claude Code from their phone. Jump to [Salon](#salon-coding--wellness) for the
+diagrams, or [`docs/salon.md`](docs/salon.md) for the whole of it.
+
 ## Printer
 
 | | |
@@ -126,6 +131,127 @@ Seat  :8787   HTTPS guest PWA for phones
 Seat  :8788   mTLS control (desk → seat)
 ```
 
+### Architecture
+
+```mermaid
+flowchart LR
+  subgraph Phone["Guest phone"]
+    PWA["Guest PWA<br/>apps/guest-web"]
+  end
+
+  subgraph Edge["Edge · ondemand only"]
+    CADDY["Caddy<br/>wildcard TLS for<br/>s-SESSION.DOMAIN"]
+  end
+
+  subgraph Desk["Desk · apps/api :8080"]
+    HOSTUI["Host UI<br/>apps/host-web"]
+    DESKAPI["FastAPI main.py<br/>check-in · board · live · specs"]
+    STORE[("data/salon.db<br/>store.py")]
+    SEATSVC["seats.py · infra.py · caddy.py<br/>raise seat, pg, redis, route"]
+    GRADE["testgen.py<br/>blind suite, sandboxed run"]
+    DEPLOY["deploy.py · provision.py<br/>preview deploys"]
+    QUEUE["slips.py · printing.py<br/>slip compose + print queue"]
+  end
+
+  subgraph Seat["Seat · apps/seat"]
+    GUEST["Guest app :8787<br/>main.py · gate.py"]
+    CTRL["Control :8788<br/>control.py, mTLS"]
+    CHAT["claude_chat.py<br/>stream-json bridge"]
+    WSPACE[("Workspace<br/>git + refs/byoi/")]
+  end
+
+  subgraph Counter["Counter"]
+    RELAY["scripts/print-relay.py"]
+    DRIVER["peripage_a6<br/>BLE driver"]
+    PRINTER["PeriPage A6"]
+  end
+
+  CC["Claude Code CLI"]
+  ANTH["Anthropic API"]
+  VENDORS["GitHub · Vercel · Neon · Upstash"]
+
+  PWA -->|"HTTPS + OTP"| CADDY
+  CADDY --> GUEST
+  PWA -.->|"static: straight to the seat LAN IP"| GUEST
+  HOSTUI --> DESKAPI
+  DESKAPI --> STORE
+  DESKAPI --> SEATSVC
+  DESKAPI --> GRADE
+  DESKAPI --> DEPLOY
+  DESKAPI --> QUEUE
+  SEATSVC -->|"docker"| Seat
+  DESKAPI -->|"mTLS + host.token"| CTRL
+  CTRL --> CHAT
+  GUEST --> CHAT
+  CHAT --> CC
+  CC --> ANTH
+  CHAT --> WSPACE
+  GRADE -->|"reads refs/byoi/"| WSPACE
+  DEPLOY --> VENDORS
+  RELAY -->|"outbound claim"| QUEUE
+  RELAY --> DRIVER
+  DRIVER -->|"Bluetooth LE"| PRINTER
+```
+
+Three trust boundaries hold this together, and none of them is the network:
+
+* **Desk → seat is a certificate**, not an address. Both ends trust only the
+  salon CA, and `host.token` rides along as a second factor. Cafe DHCP moves;
+  the certificate does not.
+* **Guest → seat is the OTP**, then a ticket, with a lockout after eight
+  failures. That is unchanged whether the phone is on the seat's Wi-Fi or on
+  cellular through Caddy.
+* **The seat never holds a credential the desk owns.** The guest's Claude has
+  Bash and inherits the seat's environment, so the Docker socket, the Vercel
+  token, and the grading account all stay on the desk. That is why the desk —
+  not the seat — raises containers, grades, and deploys.
+
+### A visit, end to end
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Host
+  participant Desk
+  participant Relay as Counter relay
+  actor Guest
+  participant Seat
+  participant CC as Claude Code
+
+  Host->>Desk: Sit a guest
+  Desk->>Desk: pick a seat, allocate a Claude account
+  opt ondemand
+    Desk->>Seat: raise the container, mint its cert, publish s-SESSION.DOMAIN
+    Desk->>Seat: wait for the control port to answer
+  end
+  Desk->>Seat: POST /local/admit over mTLS, carrying the OTP
+  Desk->>Relay: queue the slip
+  Relay->>Guest: thermal slip, QR is /join?otp=...
+  Guest->>Seat: open the QR, add the PWA to the Home Screen
+  Seat->>Seat: gate.py checks the OTP, issues a ticket
+  Guest->>Desk: claim a brief from the solution board
+  Desk->>Seat: set the workspace, clone the project, start Postgres and Redis
+  Guest->>Seat: WebSocket /chat
+  Seat->>CC: prompt over stream-json
+  CC-->>Seat: messages, diffs, todos, can_use_tool requests
+  Seat-->>Guest: chat, tool cards, Allow or Deny
+  Guest->>Seat: I'm done
+  Desk->>Seat: POST /local/submit
+  Seat->>Seat: pin the tree to refs/byoi/submissions/SESSION
+  Desk->>Desk: write a suite from the spec alone, run it in a sandboxed container
+  Desk-->>Guest: pass or fail, one case per requirement
+  Host->>Desk: Free the seat
+  Desk->>Seat: revoke the token, destroy container, workspace, route, pg, redis
+```
+
+The two halves that look like conveniences are the ones worth reading twice.
+The OTP travels to the seat over mTLS and never over the guest's Wi-Fi, so a
+phone on that network learns nothing by listening. And the suite is written
+from the spec **before** anything reads the guest's code, so a solution cannot
+shape the test that judges it.
+
+### Running it
+
 On one PC:
 
 ```bash
@@ -167,9 +293,10 @@ either mode. Behind a reverse proxy every request looks like it came from
 the counter. The slip QR is `https://<seat-ip>:8787/join?otp=…` on a salon PC and
 `https://s-<session>.<domain>/join?otp=…` in the cloud.
 
-**Floor / Solutions / Live.** Desk tabs: seats, the solution board, and a
-mirror of the guest session. **Sit a guest** opens a centered QR — the
-image is the join code only; the printer still gets the full thermal slip.
+**Floor / Solutions / Specs & QA / Live.** Desk tabs: seats, the solution
+board, the acceptance specs and every graded visit, and a mirror of the guest
+session. **Sit a guest** opens a centered QR — the image is the join code only;
+the printer still gets the full thermal slip.
 On the phone: scan, pick a solution, **Chat** — on the seat's Wi-Fi if the seat
 is this PC, from anywhere if it is a cloud container. Claude Code runs on the
 seat; the phone is messages, tools, diffs, files, photos, plan/code modes, and a
@@ -184,8 +311,23 @@ approves. It is also not private from the operator while the session runs.
 
 **Solutions.** Each board item can have a **project** (new GitHub repo, clone,
 or a folder on this PC). Claiming it sets the seat workspace to that folder.
-An optional **acceptance spec** runs when the guest taps **I'm done** — the
-seat grades the work and the phone shows pass/fail.
+An optional **acceptance spec** is graded when the guest taps **I'm done**, and
+the phone shows pass/fail per requirement.
+
+Grading runs on the **desk**, not the seat, and the suite is written from the
+spec alone — with no tools, so it never reads the code it judges — then run in a
+container with `--network none` and every `BYOI_*` value stripped. The seat only
+pins the guest's tree to a ref under `refs/byoi/`; its `HEAD`, index, and working
+tree are left untouched. Write and edit the specs on the desk's **Specs & QA**
+tab, which is also the only place that keeps the history of graded visits — the
+floor and board panels drop a visit the moment it completes.
+
+**Deploy preview.** A brief whose project has a data layer can be shipped from
+the phone: the desk fetches the pinned tree, provisions managed Postgres and
+Redis, and runs `vercel` with its own token — which never goes near the seat,
+because the guest's Claude has Bash there. If the brief has a spec, a smoke suite
+runs against the live URL. Freeing the seat deletes the deployment, the Vercel
+project, and the provisioned infrastructure.
 
 The board a fresh desk opens with is `apps/api/seed_board.py` — today, the
 fixes waiting on [The Fusion Studio](https://github.com/boscojacinto/thefusionstudio)
@@ -196,6 +338,21 @@ button), so startup stays offline.
 land in `data/projects/`. On a salon PC, phone browsers warn on the salon CA
 until `https://<seat-ip>:8787/ca.pem` is installed; in the cloud the certificate
 is a real one and there is nothing to install.
+
+## Repo layout
+
+| Path | What lives there |
+|---|---|
+| `src/peripage_a6/` | The printer driver: protocol, raster, transports, `peripage` CLI |
+| `apps/api/` | Desk — FastAPI, check-in, board, seats, grading, deploys, print queue |
+| `apps/seat/` | Seat — guest app, OTP gate, mTLS control, Claude Code bridge |
+| `apps/host-web/` · `apps/guest-web/` · `apps/coder/` | Desk UI, guest PWA, operator terminal |
+| `apps/guest/` | Optional Expo app, for when a phone will not take the salon CA |
+| `apps/templates/` | Project templates a brief can be seeded from |
+| `scripts/` | Bring-up, TLS, secrets, backup, and the counter's print relay |
+| `deploy/` | Dockerfiles, Compose, and the Caddyfile for the cloud shape |
+| `docs/` | [`protocol.md`](docs/protocol.md) (the printer) · [`salon.md`](docs/salon.md) (the floor) |
+| `tests/` | The whole suite. No hardware, no network, no credentials |
 
 ## What this is not
 
