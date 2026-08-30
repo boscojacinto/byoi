@@ -11,6 +11,11 @@ from typing import Any
 
 from .claude_chat import CLAUDE_BIN, default_workspace
 
+# Where the verifier may write. Steering it here is only half the guarantee —
+# the directory is deleted after the run either way, so a test it leaves behind
+# does not survive in a tree the guest still has a terminal on.
+SCRATCH = ".byoi-verify"
+
 SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -43,7 +48,9 @@ def verify_prompt(*, title: str, spec: str) -> str:
         "Inspect the working tree. Run the project's own tests if they exist "
         "(pytest, npm test, go test, etc.). For each distinct requirement in the spec, "
         "emit one test case with pass true or false and a short detail.\n"
-        "Do not rewrite the guest's product code; you may add a temporary test file if needed.\n"
+        "Do not rewrite the guest's product code. If you need a test of your own, put\n"
+        f"it under `{SCRATCH}/` and write nowhere else — the guest keeps this working\n"
+        "tree and must never read the tests that graded them.\n"
         "Return structured output only."
     )
 
@@ -147,6 +154,10 @@ def run_verify(*, spec: str, title: str = "", cwd: str | None = None) -> dict[st
         raise RuntimeError("claude is not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("verifier timed out") from exc
+    finally:
+        # Runs on the timeout and crash paths too: those are exactly the runs
+        # that leave a half-written test sitting in the guest's tree.
+        shutil.rmtree(work / SCRATCH, ignore_errors=True)
     raw = (proc.stdout or "").strip() or (proc.stderr or "").strip()
     if proc.returncode != 0 and not raw:
         raise RuntimeError(proc.stderr.strip() or f"claude exited {proc.returncode}")

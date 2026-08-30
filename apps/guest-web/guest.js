@@ -1011,23 +1011,29 @@ function resultsHTML() {
   const report = state.testReport;
   const status = state.testStatus || "running";
   const cases = (report && report.cases) || [];
-  const rows = cases
+  // What went wrong is what you act on, so it reads first. `reason` is written
+  // by the desk from the spec; the suite itself never reaches this screen.
+  const ordered = [...cases].sort((a, b) => Number(!!a.pass) - Number(!!b.pass));
+  const rows = ordered
     .map(
       (c) => `<li class="${c.pass ? "pass" : "fail"}">${c.pass ? "✓" : "✕"} <strong>${escapeHtml(c.name)}</strong>
-      ${c.detail ? `<span>${escapeHtml(c.detail)}</span>` : ""}</li>`
+      ${!c.pass && c.reason ? `<span>${escapeHtml(c.reason)}</span>` : ""}</li>`
     )
     .join("");
   const heading =
     status === "running"
       ? "Testing against the spec…"
-      : status === "passed"
-        ? `${report?.passed ?? 0} passed`
-        : `${report?.failed ?? 0} failed · ${report?.passed ?? 0} passed`;
+      : report?.blocked
+        ? "Couldn't finish grading"
+        : status === "passed"
+          ? `${report?.passed ?? 0} passed`
+          : `${report?.failed ?? 0} failed · ${report?.passed ?? 0} passed`;
   return `<div class="screen">
     <p class="eyebrow">Review</p>
     <h1>${escapeHtml(heading)}</h1>
     <p class="lede">${escapeHtml(report?.summary || state.status || "")}</p>
     ${status === "running" ? `<p class="status">Checking your work. Hang tight.</p>` : ""}
+    ${report?.note ? `<p class="status">${escapeHtml(report.note)}</p>` : ""}
     <ul class="cases">${rows || (status === "running" ? "" : "<li>Nothing to report.</li>")}</ul>
     <button class="btn ghost" id="leave">Leave</button>
   </div>`;

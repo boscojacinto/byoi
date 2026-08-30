@@ -305,9 +305,13 @@ def test_complete_falls_back_to_seat_and_says_why(tmp_path: Path, monkeypatch):
                     json={"seat_id": "seat-1", "coder_name": "Ada"}).json()["session"]["id"]
     desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
     desk.post(f"/api/sessions/{sid}/complete")
+    # The desk is told which grader ran and why; the guest is told the result.
+    row = desk.get("/api/sessions/grading").json()["sessions"][0]
+    assert row["test_report"]["summary"].startswith("Graded on the seat (")
+    assert "seat graded it" in row["test_report"]["summary"]
     report = desk.get(f"/api/sessions/{sid}/tests").json()["test_report"]
-    assert report["summary"].startswith("Graded on the seat (")
-    assert "seat graded it" in report["summary"]
+    assert report["summary"] == "All 1 checks passed."
+    assert report["cases"] == [{"name": "quiet zone", "pass": True}]
 
 
 def test_an_unexpected_host_failure_still_produces_a_report(tmp_path: Path, monkeypatch):
@@ -328,7 +332,11 @@ def test_an_unexpected_host_failure_still_produces_a_report(tmp_path: Path, monk
     desk.post(f"/api/sessions/{sid}/complete")
     tests = desk.get(f"/api/sessions/{sid}/tests").json()
     assert tests["test_status"] != "running"
-    assert "disk on fire" in tests["test_report"]["summary"]
+    # The guest learns the suite produced nothing; the crash text is the desk's.
+    assert tests["test_report"]["note"]
+    assert "disk on fire" not in repr(tests["test_report"])
+    row = desk.get("/api/sessions/grading").json()["sessions"][0]
+    assert "disk on fire" in row["test_report"]["summary"]
 
 
 def test_a_total_failure_still_produces_a_report(tmp_path: Path, monkeypatch):
@@ -346,7 +354,12 @@ def test_a_total_failure_still_produces_a_report(tmp_path: Path, monkeypatch):
     desk.post(f"/api/sessions/{sid}/complete")
     tests = desk.get(f"/api/sessions/{sid}/tests").json()
     assert tests["test_status"] == "failed"
-    assert "everything is down" in tests["test_report"]["summary"]
+    # A dead pipeline is not a failed check — the phone must not blame the guest.
+    assert tests["test_report"]["blocked"] is True
+    assert tests["test_report"]["cases"] == []
+    assert "everything is down" not in repr(tests["test_report"])
+    row = desk.get("/api/sessions/grading").json()["sessions"][0]
+    assert "everything is down" in row["test_report"]["summary"]
 
 
 # ------------------------------------------------------------------ smoke mode
