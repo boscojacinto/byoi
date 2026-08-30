@@ -455,6 +455,7 @@ def grade(plan: dict[str, Any], dest: Path, run: dict[str, Any]) -> dict[str, An
         cases.append(
             {
                 "name": name,
+                "requirement": requirement,
                 "pass": ok,
                 "detail": detail or (requirement if not ok else ""),
             }
@@ -464,6 +465,7 @@ def grade(plan: dict[str, Any], dest: Path, run: dict[str, Any]) -> dict[str, An
         cases.append(
             {
                 "name": f"completeness: {requirement}",
+                "requirement": requirement,
                 "pass": False,
                 "detail": "the suite reported no result for this requirement",
             }

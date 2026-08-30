@@ -241,3 +241,52 @@ def test_api_live_mirrors_guest_history(tmp_path: Path, monkeypatch):
     assert sessions[0]["seat"]["id"] == "seat-1"
     assert sessions[0]["live"]["history"][0]["text"] == "ls"
     assert client.get("/api/live").status_code == 401
+
+
+def test_guest_result_shows_pass_fail_without_the_suite(tmp_path: Path):
+    """The phone gets every case and a reason; the desk keeps the raw report.
+
+    /api/sessions/{id}/tests is the only grading route with no operator auth,
+    so it is the one place the blind suite could leak back to the guest it
+    graded.
+    """
+    from apps.api.store import Store
+
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    check = client.post(
+        "/api/sessions/check-in",
+        json={"seat_id": "seat-1", "coder_name": "Ada"},
+        headers=headers,
+    )
+    sid = check.json()["session"]["id"]
+    Store(tmp_path / "salon.db").set_test_report(
+        sid,
+        {
+            "summary": "pytest in docker: 1 passed, 1 failed",
+            "passed": 1,
+            "failed": 1,
+            "cases": [
+                {"name": "ok", "requirement": "lists notes", "pass": True, "detail": ""},
+                {
+                    "name": ".byoi/tests/test_notes.py::test_missing",
+                    "requirement": "404 on an unknown id",
+                    "pass": False,
+                    "detail": "assert 200 == 404\n.byoi/tests/test_notes.py:42",
+                },
+            ],
+        },
+    )
+
+    guest = client.get(f"/api/sessions/{sid}/tests").json()
+    assert guest["test_status"] == "failed"
+    report = guest["test_report"]
+    assert report["passed"] == 1 and report["failed"] == 1
+    assert [c["name"] for c in report["cases"]] == ["lists notes", "404 on an unknown id"]
+    assert report["cases"][1]["reason"] == (
+        "The response came back 200 where the spec requires 404."
+    )
+    assert ".byoi" not in repr(report) and "test_notes" not in repr(report)
+
+    row = client.get("/api/sessions/grading", headers=headers).json()["sessions"][0]
+    assert ".byoi/tests/test_notes.py:42" in row["test_report"]["cases"][1]["detail"]

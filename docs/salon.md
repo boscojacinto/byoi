@@ -395,6 +395,37 @@ Three properties this buys:
   scratch index onto a ref under `refs/byoi/`. No branch tracks it; the guest's
   `HEAD`, index, and working tree are unchanged.
 
+### What the guest is shown
+
+The phone gets every case with a ✓ or ✕ and, for a failure, one line on why —
+failures first, since that is what you act on. It never gets the suite.
+
+`/api/sessions/{id}/tests` is the only grading route a phone can reach without
+operator auth, so it does not serve the stored report: that quotes the runner
+verbatim, and a JUnit failure message carries the assertion source, the test
+path and a traceback. `apps/api/guest_report.py` rebuilds it instead —
+
+* the **label** is the host's own spec clause, or a test name with its path
+  stripped when a case has no clause;
+* the **reason** is written from templates in that module, filled only with
+  tokens matched against an allowlist: a status code, a short scalar, an
+  exception class name. Anything else degrades to "This check did not pass."
+  rather than passing text through. The clause above it still names the
+  behaviour that was missing, which is the actionable half;
+* a **grader outage** (`grader_error`) is reported as "couldn't finish
+  grading", not as a failed check — a dead pipeline must not read on the phone
+  as the guest's bug.
+
+The full report, raw details and all, stays on the operator-authed
+`/api/sessions/grading` behind the Specs & QA tab.
+
+The blind suite never reaches the seat at all — it is written and run on the
+desk, against a fetched ref. The one path that does write into the guest's own
+tree is the fallback seat verifier, which may need a test of its own; it is
+steered to `.byoi-verify/` and that directory is deleted in a `finally`, so a
+timeout or a crash cannot leave a test behind in a workspace the guest still
+has a terminal on.
+
 Log the host account in once, alongside the seat accounts:
 
 ```bash

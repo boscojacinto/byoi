@@ -27,6 +27,7 @@ from apps.secrets import read_secret
 
 from . import caddy
 from . import deploy as deploy_ops
+from . import guest_report
 from . import infra as desk_infra
 from . import operator
 from . import seats
@@ -666,10 +667,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         try:
             report = seat_sync.verify_solution(seat, spec=spec, title=title, cwd=cwd)
         except Exception as exc:
+            # Both graders are down. `grader_error` keeps the guest's screen
+            # honest about that: without it a dead pipeline reads on the phone
+            # as a failed check, blaming the guest for our outage.
             report = {
                 "summary": str(exc),
                 "passed": 0,
                 "failed": 1,
+                "grader_error": True,
                 "cases": [{"name": "seat verifier", "pass": False, "detail": str(exc)}],
             }
         if fallback_reason:
@@ -790,13 +795,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}/tests")
     def session_tests(session_id: str) -> dict:
+        """The guest's own result, redacted.
+
+        This is the one grading endpoint a phone can reach without operator
+        auth, so it never serves the stored report: that quotes the suite —
+        assertion source, test paths, tracebacks — and the guest is graded
+        blind. `guest_report.redact` rebuilds it from the spec clauses plus
+        reasons it writes itself. The full report stays on /api/sessions/grading.
+        """
         sess = store.session(session_id)
         if not sess:
             raise HTTPException(404, "unknown session")
         return {
             "session_id": session_id,
             "test_status": sess.get("test_status"),
-            "test_report": sess.get("test_report"),
+            "test_report": guest_report.redact(sess.get("test_report")),
         }
 
     @app.get("/api/sessions/{session_id}")

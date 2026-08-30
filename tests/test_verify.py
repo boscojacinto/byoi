@@ -1,8 +1,11 @@
+import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
+from apps.seat import verify
 from apps.seat.verify import parse_verify_output, verify_prompt
 
 
@@ -33,6 +36,24 @@ def test_verify_prompt_includes_spec():
     text = verify_prompt(title="Slip QR", spec="- contrast >= 4.5\n- quiet zone 4 modules")
     assert "Slip QR" in text
     assert "contrast >= 4.5" in text
+    assert verify.SCRATCH in text
+
+
+def test_the_verifiers_own_tests_never_survive_in_the_guests_tree(tmp_path, monkeypatch):
+    """This one runs in the workspace the guest still has a terminal on."""
+    work = tmp_path / "work"
+    (work / verify.SCRATCH).mkdir(parents=True)
+
+    def fake_run(argv, **kw):
+        # What the verifier is steered to do: write its test into the scratch dir.
+        (work / verify.SCRATCH / "test_spec.py").write_text("assert secret_expectation")
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(verify.subprocess, "run", fake_run)
+    monkeypatch.setattr(verify.shutil, "which", lambda _: "/usr/bin/claude")
+    with pytest.raises(RuntimeError, match="timed out"):
+        verify.run_verify(spec="- must work", cwd=str(work))
+    assert not (work / verify.SCRATCH).exists()
 
 
 def test_complete_without_spec_does_not_test(tmp_path: Path):

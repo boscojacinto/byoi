@@ -395,8 +395,8 @@ def test_complete_grades_before_it_destroys_the_seat_on_demand(tmp_path, monkeyp
     res = desk.post(f"/api/sessions/{sess['id']}/complete")
     assert res.status_code == 200
     assert order == ["lock", "submit", "grade", "destroy"], order
-    report = desk.get(f"/api/sessions/{sess['id']}/tests").json()["test_report"]
-    assert report["summary"] == "ok"
+    assert store.session(sess["id"])["test_report"]["summary"] == "ok"
+    assert desk.get(f"/api/sessions/{sess['id']}/tests").json()["test_report"] is not None
 
 
 def test_reconcile_clears_a_seat_with_no_live_session(tmp_path, monkeypatch, caddy_admin):
