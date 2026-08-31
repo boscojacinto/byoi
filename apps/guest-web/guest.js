@@ -55,6 +55,9 @@ const state = {
   handoffAvailable: false,
   todos: [],
   suggestions: [],
+  // Explicit open/closed state for activity groups, tool bodies and thinking,
+  // keyed "g:"/"t:"/"k:" + id. Absent means "use the default for that row".
+  expanded: {},
   sheet: null,
   files: null,
   filePath: "",
@@ -93,23 +96,103 @@ function escapeHtml(text) {
     .replace(/"/g, "&quot;");
 }
 
-function renderMarkdown(raw) {
-  const escaped = escapeHtml(raw);
-  const parts = escaped.split(/```([\s\S]*?)```/);
-  return parts
-    .map((chunk, i) => {
-      if (i % 2 === 1) {
-        const nl = chunk.indexOf("\n");
-        const body = (nl === -1 ? chunk : chunk.slice(nl + 1)).replace(/\n$/, "");
-        return `<div class="term-wrap"><button type="button" class="copy">copy</button><pre class="term"><code>${body}</code></pre></div>`;
+function inlineMarkdown(raw) {
+  let html = escapeHtml(raw);
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>'
+  );
+  html = html.replace(
+    /(^|[\s(])(https?:\/\/[^\s<)]+)/g,
+    '$1<a href="$2" target="_blank" rel="noreferrer noopener">$2</a>'
+  );
+  return html;
+}
+
+function codeBlockHTML(chunk) {
+  const nl = chunk.indexOf("\n");
+  const lang = (nl === -1 ? "" : chunk.slice(0, nl)).trim().split(/\s+/)[0];
+  const body = (nl === -1 ? chunk : chunk.slice(nl + 1)).replace(/\n+$/, "");
+  return `<div class="code">
+    <div class="code-bar"><span class="lang">${escapeHtml(lang || "code")}</span><button type="button" class="copy">Copy</button></div>
+    <pre class="term"><code>${escapeHtml(body)}</code></pre>
+  </div>`;
+}
+
+function renderProse(raw) {
+  const out = [];
+  let list = null;
+  let para = [];
+  const flushPara = () => {
+    if (para.length) out.push(`<p>${para.join("<br>")}</p>`);
+    para = [];
+  };
+  const flushList = () => {
+    if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${i}</li>`).join("")}</${list.tag}>`);
+    list = null;
+  };
+  for (const line of String(raw || "").split("\n")) {
+    const text = line.trim();
+    if (!text) {
+      flushPara();
+      flushList();
+      continue;
+    }
+    const heading = text.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      flushPara();
+      flushList();
+      out.push(`<div class="md-h md-h${heading[1].length}">${inlineMarkdown(heading[2])}</div>`);
+      continue;
+    }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(text)) {
+      flushPara();
+      flushList();
+      out.push("<hr>");
+      continue;
+    }
+    const bullet = text.match(/^[-*+]\s+(.*)$/);
+    if (bullet) {
+      flushPara();
+      if (!list || list.tag !== "ul") {
+        flushList();
+        list = { tag: "ul", items: [] };
       }
-      return chunk
-        .replace(/`([^`]+)`/g, "<code>$1</code>")
-        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/(^|\n)- (.*)/g, "$1• $2")
-        .replace(/\n\n/g, "</p><p>")
-        .replace(/\n/g, "<br>");
-    })
+      list.items.push(inlineMarkdown(bullet[1]));
+      continue;
+    }
+    const numbered = text.match(/^\d+[.)]\s+(.*)$/);
+    if (numbered) {
+      flushPara();
+      if (!list || list.tag !== "ol") {
+        flushList();
+        list = { tag: "ol", items: [] };
+      }
+      list.items.push(inlineMarkdown(numbered[1]));
+      continue;
+    }
+    const quote = text.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushPara();
+      flushList();
+      out.push(`<blockquote>${inlineMarkdown(quote[1])}</blockquote>`);
+      continue;
+    }
+    flushList();
+    para.push(inlineMarkdown(text));
+  }
+  flushPara();
+  flushList();
+  return out.join("");
+}
+
+function renderMarkdown(raw) {
+  return String(raw || "")
+    .split("```")
+    .map((chunk, i) => (i % 2 === 1 ? codeBlockHTML(chunk) : renderProse(chunk)))
     .join("");
 }
 
@@ -361,15 +444,23 @@ function applyChatEvent(msg) {
   if (kind === "assistant" || kind === "thinking") {
     const id = msg.id || kind;
     const existing = state.messages.find((m) => m.id === id && m.kind === kind);
+    const clock =
+      kind === "thinking"
+        ? { t0: existing?.t0 || Date.now(), t1: msg.done ? Date.now() : existing?.t1 }
+        : {};
     if (msg.delta) {
-      upsert({ id, kind, text: (existing?.text || "") + (msg.text || ""), done: !!msg.done });
+      upsert({ id, kind, text: (existing?.text || "") + (msg.text || ""), done: !!msg.done, ...clock });
     } else {
-      upsert({ id, kind, text: msg.text || existing?.text || "", done: !!msg.done });
+      upsert({ id, kind, text: msg.text || existing?.text || "", done: !!msg.done, ...clock });
     }
     render();
     return;
   }
   if (kind === "tool" || kind === "ask") {
+    if (kind === "tool" && msg.status === "running") {
+      const info = toolInfo(msg);
+      state.chatLabel = [info.verbing, info.subject].filter(Boolean).join(" ").slice(0, 60);
+    }
     upsert({
       id: msg.id || uid(),
       kind,
@@ -623,6 +714,7 @@ function sendUser(text, images) {
   wsSend({ type: "user", text: trimmed, images: pics });
   state.images = [];
   render();
+  scrollLog(true);
 }
 
 function runSlash(entry) {
@@ -648,6 +740,383 @@ function answerPermission(requestId, allow) {
   render();
 }
 
+function baseName(path) {
+  const clean = String(path || "").replace(/\/+$/, "");
+  const cut = clean.lastIndexOf("/");
+  return cut === -1 ? clean : clean.slice(cut + 1);
+}
+
+function dirName(path) {
+  const clean = String(path || "").replace(/\/+$/, "");
+  const cut = clean.lastIndexOf("/");
+  return cut === -1 ? "" : clean.slice(0, cut);
+}
+
+function hostOf(url) {
+  const match = String(url || "").match(/^https?:\/\/([^/]+)/i);
+  return match ? match[1] : String(url || "");
+}
+
+const KIND_ICON = {
+  read: "▤",
+  edit: "✎",
+  create: "＋",
+  run: "❯",
+  search: "⌕",
+  web: "◎",
+  plan: "☰",
+  agent: "✦",
+  tool: "•",
+};
+
+// One tool call, said the way the mobile app says it: a past-tense verb for
+// what happened and a present participle for what is happening right now.
+function toolInfo(msg) {
+  const name = String(msg.name || "tool");
+  const input = msg.input && typeof msg.input === "object" ? msg.input : {};
+  const detail = msg.detail || "";
+  const failed = msg.status === "error";
+  const path = input.file_path || input.path || detail;
+  const make = (kind, verb, verbing, subject, sub) => ({
+    kind,
+    verb,
+    verbing,
+    subject: subject || "",
+    sub: sub || "",
+    name,
+  });
+  if (name === "Read") return make("read", "Read", "Reading", baseName(path), dirName(path));
+  if (name === "NotebookRead") return make("read", "Read", "Reading", baseName(path), dirName(path));
+  if (name === "Edit" || name === "MultiEdit" || name === "NotebookEdit") {
+    return make("edit", "Edited", "Editing", baseName(path), dirName(path));
+  }
+  if (name === "Write") return make("create", "Wrote", "Writing", baseName(path), dirName(path));
+  if (name === "Bash") {
+    const command = String(input.command || detail || "");
+    if (input.run_in_background) {
+      return make(
+        "run",
+        failed ? "Background shell failed" : "Started a background shell",
+        "Starting a background shell",
+        command
+      );
+    }
+    return make("run", failed ? "Command failed" : "Ran", "Running", command);
+  }
+  if (name === "BashOutput") {
+    return make("run", failed ? "Background shell failed" : "Checked a background shell", "Checking a background shell", detail);
+  }
+  if (name === "KillShell" || name === "KillBash") {
+    return make("run", "Stopped a background shell", "Stopping a background shell", detail);
+  }
+  if (name === "Grep") return make("search", "Searched for", "Searching for", input.pattern || detail);
+  if (name === "Glob") return make("search", "Found files matching", "Looking for files matching", input.pattern || detail);
+  if (name === "WebFetch") return make("web", "Fetched", "Fetching", hostOf(input.url || detail));
+  if (name === "WebSearch") return make("web", "Searched the web for", "Searching the web for", input.query || detail);
+  if (name === "TodoWrite") {
+    const count = Array.isArray(input.todos) ? input.todos.length : 0;
+    return make("plan", "Updated the task list", "Updating the task list", count ? `${count} tasks` : "");
+  }
+  if (name === "ExitPlanMode") return make("plan", "Finished the plan", "Finishing the plan", "");
+  if (name === "Task" || name === "Agent") {
+    return make("agent", "Ran an agent", "Running an agent", input.description || detail);
+  }
+  if (name === "Skill") return make("agent", "Ran the skill", "Running the skill", input.skill || detail);
+  return make("tool", name, name, detail);
+}
+
+// What a permission prompt is asking for, as something Claude is about to do
+// rather than something it did.
+const ASK_VERB = {
+  Read: "read",
+  NotebookRead: "read",
+  Edit: "edit",
+  MultiEdit: "edit",
+  NotebookEdit: "edit",
+  Write: "write",
+  Bash: "run this command",
+  BashOutput: "check a background shell",
+  KillShell: "stop a background shell",
+  KillBash: "stop a background shell",
+  Grep: "search for",
+  Glob: "look for files matching",
+  WebFetch: "fetch",
+  WebSearch: "search the web for",
+  TodoWrite: "update the task list",
+  ExitPlanMode: "finish the plan",
+  Task: "run an agent",
+  Agent: "run an agent",
+  Skill: "run a skill",
+};
+
+const diffCache = new Map();
+
+function diffLines(oldText, newText) {
+  const a = String(oldText || "").split("\n");
+  const b = String(newText || "").split("\n");
+  if (a.length && a[a.length - 1] === "") a.pop();
+  if (b.length && b[b.length - 1] === "") b.pop();
+  const n = a.length;
+  const m = b.length;
+  // An LCS table over very large edits costs more than the diff is worth on a
+  // phone; past this size show the blocks whole rather than line-matched.
+  if (n * m > 250000) {
+    return {
+      rows: [...a.map((s) => ({ t: "-", s })), ...b.map((s) => ({ t: "+", s }))],
+      added: m,
+      removed: n,
+      coarse: true,
+    };
+  }
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  let added = 0;
+  let removed = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      rows.push({ t: " ", s: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      rows.push({ t: "-", s: a[i] });
+      removed++;
+      i++;
+    } else {
+      rows.push({ t: "+", s: b[j] });
+      added++;
+      j++;
+    }
+  }
+  while (i < n) {
+    rows.push({ t: "-", s: a[i++] });
+    removed++;
+  }
+  while (j < m) {
+    rows.push({ t: "+", s: b[j++] });
+    added++;
+  }
+  return { rows, added, removed };
+}
+
+function diffOf(msg) {
+  if (!msg.diff) return null;
+  const oldText = msg.diff.old || "";
+  const newText = msg.diff.new || "";
+  const key = `${msg.id}:${oldText.length}:${newText.length}`;
+  let cached = diffCache.get(key);
+  if (!cached) {
+    cached = diffLines(oldText, newText);
+    if (diffCache.size > 200) diffCache.clear();
+    diffCache.set(key, cached);
+  }
+  return cached;
+}
+
+function trimContext(rows, context = 3) {
+  const keep = new Array(rows.length).fill(false);
+  rows.forEach((row, idx) => {
+    if (row.t === " ") return;
+    for (let k = idx - context; k <= idx + context; k++) {
+      if (k >= 0 && k < rows.length) keep[k] = true;
+    }
+  });
+  const out = [];
+  let skipped = false;
+  rows.forEach((row, idx) => {
+    if (keep[idx]) {
+      if (skipped) out.push({ t: "…", s: "" });
+      skipped = false;
+      out.push(row);
+    } else {
+      skipped = true;
+    }
+  });
+  return out;
+}
+
+function statBadge(added, removed) {
+  if (!added && !removed) return "";
+  const plus = added ? `<span class="add">+${added}</span>` : "";
+  const minus = removed ? `<span class="del">−${removed}</span>` : "";
+  return `<span class="stat">${plus}${minus}</span>`;
+}
+
+function diffHTML(msg) {
+  const diff = diffOf(msg);
+  if (!diff) return "";
+  const rows = (diff.coarse ? diff.rows : trimContext(diff.rows)).slice(0, 500);
+  const body = rows
+    .map((row) => {
+      if (row.t === "…") return `<div class="dl skip">⋯</div>`;
+      const cls = row.t === "+" ? "add" : row.t === "-" ? "del" : "same";
+      const sign = row.t === " " ? " " : row.t;
+      return `<div class="dl ${cls}"><span class="sign">${sign}</span>${escapeHtml(row.s) || "&nbsp;"}</div>`;
+    })
+    .join("");
+  const path = msg.diff.path ? `<div class="diff-path">${escapeHtml(msg.diff.path)}</div>` : "";
+  return `<div class="diff">${path}<div class="diff-body">${body}</div></div>`;
+}
+
+// A shipped pull request or commit is the outcome of a visit, not a line of
+// terminal output — pull it out of the Bash result and give it its own card.
+function outcomeHTML(msg) {
+  if (msg.name !== "Bash" || msg.status === "running") return "";
+  const command = String(msg.input?.command || msg.detail || "");
+  const output = String(msg.output || "");
+  const cards = [];
+  const pr = output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/(\d+)/);
+  if (pr && /\bpr\s+create\b/.test(command)) {
+    cards.push(`<a class="outcome pr" href="${escapeHtml(pr[0])}" target="_blank" rel="noreferrer noopener">
+      <span class="outcome-verb">Created PR #${escapeHtml(pr[1])}</span>
+      <span class="outcome-sub">${escapeHtml(pr[0])}</span>
+    </a>`);
+  }
+  const commit = output.match(/^\[(\S+)\s+([0-9a-f]{7,40})\]\s+(.*)$/m);
+  if (commit) {
+    cards.push(`<div class="outcome commit">
+      <span class="outcome-verb">Committed ${escapeHtml(commit[2].slice(0, 7))} on ${escapeHtml(commit[1])}</span>
+      <span class="outcome-sub">${escapeHtml(commit[3])}</span>
+    </div>`);
+  }
+  return cards.join("");
+}
+
+function toolBodyHTML(msg) {
+  const diff = diffHTML(msg);
+  const raw = isNoise(msg.output) ? "" : msg.output || "";
+  const out = raw ? `<pre class="term">${escapeHtml(raw.slice(0, 32000))}</pre>` : "";
+  if (!diff && !out) {
+    return msg.status === "running" ? "" : `<div class="tool-empty">No output.</div>`;
+  }
+  return `${diff}${out}`;
+}
+
+function toolRowHTML(msg) {
+  const info = toolInfo(msg);
+  const running = msg.status === "running";
+  const failed = msg.status === "error";
+  const open = state.expanded[`t:${msg.id}`] ?? failed;
+  const diff = diffOf(msg);
+  const mark = running
+    ? `<span class="spin"></span>`
+    : `<span class="glyph ${failed ? "bad" : ""}">${failed ? "!" : KIND_ICON[info.kind] || "•"}</span>`;
+  const verb = running ? info.verbing : info.verb;
+  const subject = info.subject
+    ? `<span class="subject ${info.kind === "run" ? "mono" : ""}">${escapeHtml(info.subject)}</span>`
+    : "";
+  const sub = info.sub && !open ? "" : info.sub ? `<div class="tool-sub">${escapeHtml(info.sub)}</div>` : "";
+  const stat = diff ? statBadge(diff.added, diff.removed) : "";
+  return `<div class="tool-row ${failed ? "bad" : ""} ${running ? "live" : ""}">
+    <button type="button" class="tool-head" data-toggle="t:${escapeHtml(msg.id)}" data-open="${open ? "1" : "0"}">
+      ${mark}<span class="verb">${escapeHtml(verb)}</span>${subject}${stat}
+      <span class="chev">${open ? "▾" : "›"}</span>
+    </button>
+    ${sub}
+    ${open ? `<div class="tool-body">${toolBodyHTML(msg)}</div>` : ""}
+    ${outcomeHTML(msg)}
+  </div>`;
+}
+
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+// "Edited 2 files, ran 6 commands  +19 −6" — the rolled-up line the mobile app
+// shows once a burst of tool calls is over.
+function groupSummary(items) {
+  const edited = new Set();
+  const created = new Set();
+  const read = new Set();
+  const counts = { run: 0, search: 0, web: 0, agent: 0, plan: 0, tool: 0 };
+  let added = 0;
+  let removed = 0;
+  let failed = 0;
+  for (const msg of items) {
+    const info = toolInfo(msg);
+    if (msg.status === "error") failed++;
+    const diff = diffOf(msg);
+    if (diff) {
+      added += diff.added;
+      removed += diff.removed;
+    }
+    const label = info.subject || info.name;
+    if (info.kind === "edit") edited.add(label);
+    else if (info.kind === "create") created.add(label);
+    else if (info.kind === "read") read.add(label);
+    else counts[info.kind] = (counts[info.kind] || 0) + 1;
+  }
+  const clauses = [];
+  const named = (set, verb) => {
+    if (!set.size) return;
+    clauses.push(set.size === 1 ? `${verb} ${[...set][0]}` : `${verb} ${plural(set.size, "file")}`);
+  };
+  named(edited, "edited");
+  named(created, "wrote");
+  named(read, "read");
+  if (counts.run) clauses.push(`ran ${plural(counts.run, "command")}`);
+  if (counts.search) clauses.push(`ran ${plural(counts.search, "search")}`.replace("searchs", "searches"));
+  if (counts.web) clauses.push(`fetched ${plural(counts.web, "page")}`);
+  if (counts.agent) clauses.push(`ran ${plural(counts.agent, "agent")}`);
+  if (counts.plan) clauses.push("updated the task list");
+  if (counts.tool) clauses.push(`used ${plural(counts.tool, "tool")}`);
+  const text = clauses.join(", ") || `${plural(items.length, "step")}`;
+  return {
+    text: text.charAt(0).toUpperCase() + text.slice(1),
+    added,
+    removed,
+    failed,
+  };
+}
+
+function toolGroupHTML(group) {
+  const items = group.items;
+  const running = items.some((m) => m.status === "running");
+  const choice = state.expanded[`g:${group.id}`];
+  const open = choice ?? (running || items.length === 1);
+  if (open) {
+    const rows = items.map(toolRowHTML).join("");
+    const collapse =
+      items.length > 1
+        ? `<button type="button" class="group-collapse" data-toggle="g:${escapeHtml(group.id)}" data-open="1">Hide steps</button>`
+        : "";
+    return `<div class="msg tools"><div class="group open">${rows}${collapse}</div></div>`;
+  }
+  const summary = groupSummary(items);
+  const bad = summary.failed ? `<span class="stat"><span class="del">${summary.failed} failed</span></span>` : "";
+  return `<div class="msg tools"><div class="group">
+    <button type="button" class="group-head" data-toggle="g:${escapeHtml(group.id)}" data-open="0">
+      <span class="glyph">✓</span><span class="verb">${escapeHtml(summary.text)}</span>
+      ${statBadge(summary.added, summary.removed)}${bad}<span class="chev">›</span>
+    </button>
+  </div></div>`;
+}
+
+// Consecutive tool calls become one activity group; everything else stays a
+// message of its own, in order.
+function chatBlocks(messages) {
+  const blocks = [];
+  for (const msg of messages) {
+    if (msg.kind === "tool") {
+      const last = blocks[blocks.length - 1];
+      if (last && last.type === "tools") {
+        last.items.push(msg);
+        continue;
+      }
+      blocks.push({ type: "tools", id: msg.id, items: [msg] });
+      continue;
+    }
+    blocks.push({ type: "msg", msg });
+  }
+  return blocks;
+}
+
 function logHTML() {
   const claimed = state.join?.item;
   if (!state.messages.length) {
@@ -657,7 +1126,9 @@ function logHTML() {
         ${claimed ? `<button class="btn small" id="use-brief">Start from this brief</button>` : ""}
       </div>`;
   }
-  return state.messages.map(messageHTML).join("");
+  return chatBlocks(state.messages)
+    .map((block) => (block.type === "tools" ? toolGroupHTML(block) : messageHTML(block.msg)))
+    .join("");
 }
 
 function todosHTML() {
@@ -745,6 +1216,7 @@ function sheetHTML() {
 function render() {
   const app = $("#app");
   if (state.view === "chat" && $("#app .screen.chat")) {
+    state.stick = nearBottom();
     const heading = $(".topbar h1");
     if (heading) {
       const seat = state.join?.seat?.name || "Claude";
@@ -772,7 +1244,7 @@ function render() {
   else app.innerHTML = joinHTML();
   bind();
   tickTimer();
-  if (state.view === "chat") scrollLog();
+  if (state.view === "chat") scrollLog(true);
 }
 
 function joinHTML() {
@@ -1082,32 +1554,26 @@ function messageHTML(msg) {
     return `<div class="msg user"><div class="bubble">${escapeHtml(msg.text)}${msg.hasImage ? "<div class='meta'>attachment</div>" : ""}</div></div>`;
   }
   if (msg.kind === "thinking") {
-    const body = escapeHtml((msg.text || "").slice(0, 2000));
+    const body = (msg.text || "").trim();
     if (!body) return "";
-    return `<div class="msg thinking"><div class="thinking">${body}</div></div>`;
+    const open = state.expanded[`k:${msg.id}`] ?? false;
+    const seconds = msg.t0 && msg.t1 ? Math.max(1, Math.round((msg.t1 - msg.t0) / 1000)) : 0;
+    const label = msg.done ? (seconds ? `Thought for ${seconds}s` : "Thought about it") : "Thinking…";
+    return `<div class="msg thinking"><div class="think">
+      <button type="button" class="think-head" data-toggle="k:${escapeHtml(msg.id)}" data-open="${open ? "1" : "0"}">
+        <span class="glyph">✳</span><span class="verb">${escapeHtml(label)}</span><span class="chev">${open ? "▾" : "›"}</span>
+      </button>
+      ${open ? `<div class="think-body">${escapeHtml(body.slice(0, 8000))}</div>` : ""}
+    </div></div>`;
   }
   if (msg.kind === "assistant") {
-    return `<div class="msg assistant"><div class="bubble"><p>${renderMarkdown(msg.text)}</p></div></div>`;
+    return `<div class="msg assistant"><div class="bubble">${renderMarkdown(msg.text)}</div></div>`;
   }
   if (msg.kind === "system") {
     return `<div class="msg system"><div class="bubble">${escapeHtml(msg.text)}</div></div>`;
   }
   if (msg.kind === "tool") {
-    const mark =
-      msg.status === "running"
-        ? `<span class="spin"></span>`
-        : `<span class="mark">${msg.status === "error" ? "!" : "✓"}</span>`;
-    const diff = msg.diff
-      ? `<div class="diff">${msg.diff.old ? `<div class="old">- ${escapeHtml(msg.diff.old.slice(0, 2500))}</div>` : ""}${
-          msg.diff.new ? `<div class="new">+ ${escapeHtml(msg.diff.new.slice(0, 2500))}</div>` : ""
-        }</div>`
-      : "";
-    const rawOut = isNoise(msg.output) ? "" : msg.output || "";
-    const out = rawOut ? `<pre class="term">${escapeHtml(rawOut.slice(0, 32000))}</pre>` : "";
-    return `<div class="msg tool"><div class="console ${msg.status === "error" ? "error" : ""}">
-      <div class="console-bar">${mark}<span class="name">${escapeHtml(msg.name || "tool")}</span>
-      <span class="detail">${escapeHtml(msg.detail || "")}</span></div>${diff}${out}
-    </div></div>`;
+    return `<div class="msg tools"><div class="group open">${toolRowHTML(msg)}</div></div>`;
   }
   if (msg.kind === "ask") {
     const qs = (msg.questions || [])
@@ -1118,18 +1584,21 @@ function messageHTML(msg) {
         return `<p>${escapeHtml(q.question || q.header || `Question ${i + 1}`)}</p><div class="row">${opts}</div>`;
       })
       .join("");
-    return `<div class="msg ask"><div class="permission"><strong>${escapeHtml(msg.name || "Claude has a question")}</strong>${qs}</div></div>`;
+    const title = !msg.name || msg.name === "AskUserQuestion" ? "Claude has a question" : msg.name;
+    return `<div class="msg ask"><div class="permission"><strong>${escapeHtml(title)}</strong>${qs}</div></div>`;
   }
   if (msg.kind === "permission") {
     if (msg.resolved) {
       return `<div class="msg permission"><div class="permission"><strong>${escapeHtml(msg.name)}</strong><p>${escapeHtml(msg.resolved)}</p></div></div>`;
     }
-    const diff = msg.diff
-      ? `<div class="diff">${msg.diff.old ? `<div class="old">${escapeHtml(msg.diff.old.slice(0, 1200))}</div>` : ""}<div class="new">${escapeHtml((msg.diff.new || "").slice(0, 1200))}</div></div>`
-      : "";
+    const info = toolInfo({ ...msg, status: "running" });
+    const diff = msg.diff ? diffHTML(msg) : "";
+    const stat = msg.diff ? (() => { const d = diffOf(msg); return statBadge(d.added, d.removed); })() : "";
+    const asking = ASK_VERB[msg.name] || `use ${msg.name}`;
     return `<div class="msg permission"><div class="permission">
-      <strong>Allow ${escapeHtml(msg.name)}?</strong>
-      <p>${escapeHtml(msg.detail || "")}</p>${diff}
+      <strong>Allow Claude to ${escapeHtml(asking)}?</strong>
+      <p class="ask-line"><span class="glyph">${KIND_ICON[info.kind] || "•"}</span>
+      <span class="subject ${info.kind === "run" ? "mono" : ""}">${escapeHtml(info.subject || msg.detail || "")}</span>${stat}</p>${diff}
       <div class="row">
         <button class="btn ghost small" data-deny="${escapeHtml(msg.requestId)}">Deny</button>
         <button class="btn small" data-allow="${escapeHtml(msg.requestId)}">Allow</button>
@@ -1143,7 +1612,12 @@ function renderChatChrome() {
   const label = $("#chat-label");
   const dot = $(".dot");
   const stop = $("#stop");
-  if (label) label.textContent = state.chatLabel;
+  if (label) {
+    label.textContent = state.chatLabel;
+    // The idle pill is a set of uppercase tags; a live label is a sentence
+    // with a shell command in it, and shouting it is unreadable.
+    label.classList.toggle("live", state.chatBusy);
+  }
   if (dot) dot.classList.toggle("busy", state.chatBusy);
   if (stop) stop.hidden = !state.chatBusy;
 }
@@ -1305,8 +1779,13 @@ function bindLog() {
   document.querySelectorAll(".copy").forEach((btn) => {
     btn.onclick = (ev) => {
       ev.stopPropagation();
-      const code = btn.parentElement?.querySelector("code, pre");
+      const wrap = btn.closest(".code") || btn.parentElement;
+      const code = wrap?.querySelector("code, pre");
       navigator.clipboard?.writeText(code?.textContent || "");
+      btn.textContent = "Copied";
+      setTimeout(() => {
+        btn.textContent = "Copy";
+      }, 1200);
     };
   });
   document.querySelectorAll("pre.term").forEach((el) => bindTermExpand(el));
@@ -1320,6 +1799,13 @@ function bindLog() {
   }
   document.querySelectorAll("[data-suggest]").forEach((btn) => {
     btn.onclick = () => sendUser(btn.getAttribute("data-suggest"));
+  });
+  document.querySelectorAll("[data-toggle]").forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      state.expanded[btn.getAttribute("data-toggle")] = btn.getAttribute("data-open") !== "1";
+      render();
+    };
   });
 }
 
@@ -1405,9 +1891,17 @@ function compressImage(file) {
   });
 }
 
-function scrollLog() {
+// Only chase the bottom when the guest is already there, so opening a step
+// they scrolled back to does not throw them forward again.
+function nearBottom() {
   const log = $("#log");
-  if (log) log.scrollTop = log.scrollHeight;
+  if (!log) return true;
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 96;
+}
+
+function scrollLog(force) {
+  const log = $("#log");
+  if (log && (force || state.stick !== false)) log.scrollTop = log.scrollHeight;
 }
 
 function fitViewport() {
