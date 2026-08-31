@@ -39,6 +39,15 @@ SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".pytest_cache"}
 Spawn = Callable[..., Awaitable[asyncio.subprocess.Process]]
 MODES = ("acceptEdits", "plan", "auto", "manual")
 
+# Claude Code writes one JSON object per line, and a line carrying a base64
+# image -- a Read of any photo in the guest's repo -- runs to hundreds of
+# kilobytes. asyncio's StreamReader defaults to 64 KiB and raises ValueError on
+# a longer line rather than returning it, which killed the read pump mid-turn:
+# the process stayed alive, so nothing said it had exited, and both the phone
+# and the desk sat on a half-finished answer forever. Measured on a 240 KB
+# .webp, which is ~321 KB once base64'd.
+STREAM_LIMIT = 16 * 1024 * 1024
+
 
 def default_workspace() -> Path:
     raw = os.environ.get("BYOI_WORKSPACE", "").strip()
@@ -292,7 +301,14 @@ def _result_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return _text_of(content) or json.dumps(content)[:8000]
+        text = _text_of(content)
+        if text:
+            return text
+        # A tool result is not always text: reading a photo gives back an image
+        # block whose base64 is megabytes and says nothing on a phone. Name what
+        # came back instead of serialising it into the tool card.
+        kinds = sorted({str(b.get("type") or "block") for b in content if isinstance(b, dict)})
+        return f"[{', '.join(kinds)}]" if kinds else ""
     if content is None:
         return ""
     return str(content)
@@ -688,6 +704,7 @@ class ClaudeChat:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(cwd),
                     env=env,
+                    limit=STREAM_LIMIT,
                 )
         except FileNotFoundError:
             self.last_error = "claude is not installed on this seat"
@@ -1010,6 +1027,14 @@ class ClaudeChat:
         except asyncio.CancelledError:
             return
         except (BrokenPipeError, ConnectionResetError):
+            return
+        except (ValueError, asyncio.LimitOverrunError):
+            # A line the reader cannot return leaves it out of step with the
+            # stream, so this process is finished whatever we do. Say so: going
+            # quiet here is what left a guest watching a spinner that would
+            # never stop, with nothing in the logs either.
+            self.last_error = "Claude Code sent more in one go than the seat could read — the turn was cut short. Ask again, and avoid opening large images."
+            await self._broadcast({"type": "error", "message": self.last_error})
             return
         finally:
             self._busy = False

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -578,3 +579,70 @@ def test_a_binary_that_will_not_run_drops_the_extras(monkeypatch):
         claude_chat.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
     )
     assert claude_chat.supports_flag("claude", "--prompt-suggestions") is False
+
+
+def test_an_image_result_is_named_not_dumped():
+    """A Read of a photo comes back as an image block, not as text.
+
+    Serialising it put ~321 KB of base64 into the tool card the phone renders,
+    which is both unreadable and enormous. Name the block instead.
+    """
+    image = {"type": "image", "source": {"type": "base64", "data": "A" * 5000}}
+
+    assert claude_chat._result_text([image]) == "[image]"
+    assert "AAAA" not in claude_chat._result_text([image])
+    # Text still wins whenever there is any.
+    assert claude_chat._result_text([{"type": "text", "text": "ok"}, image]) == "ok"
+
+
+def test_the_reader_takes_a_line_carrying_an_image(monkeypatch):
+    """asyncio's 64 KiB default killed the read pump mid-turn, silently.
+
+    A base64 image line runs to hundreds of kilobytes and readline() raises
+    ValueError rather than returning it. The process stayed alive, so the
+    "Claude Code exited" branch never fired, and the phone and the desk both
+    froze on a half-finished answer with nothing in the logs.
+    """
+    seen: dict = {}
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*argv, **kwargs):
+        seen.update(kwargs)
+        return await real(*argv, **kwargs)
+
+    monkeypatch.setattr(claude_chat.asyncio, "create_subprocess_exec", spy)
+    # A stand-in for claude that emits one oversized stream-json line.
+    monkeypatch.setattr(
+        claude_chat,
+        "claude_argv",
+        lambda: [
+            sys.executable,
+            "-u",
+            "-c",
+            "import json;"
+            "print(json.dumps({'type':'user','message':{'content':["
+            "{'type':'tool_result','tool_use_id':'t1','content':["
+            "{'type':'image','source':{'type':'base64','data':'A'*400000}}]}]}}));"
+            "print(json.dumps({'type':'result','subtype':'success'}))",
+        ],
+    )
+
+    chat = claude_chat.ClaudeChat()
+
+    async def drive():
+        await chat.ensure()
+        for _ in range(200):
+            if any(e.get("type") == "usage" for e in chat._history):
+                break
+            await asyncio.sleep(0.05)
+        chat._stop_process()
+
+    asyncio.run(drive())
+
+    # The symptom first: the oversized line has to come out the other side.
+    tools = [e for e in chat._history if e.get("type") == "tool"]
+    assert tools, "the image tool_result never arrived -- the pump died on it"
+    assert tools[0]["output"] == "[image]"
+    # Then the mechanism that makes it possible.
+    assert seen.get("limit") == claude_chat.STREAM_LIMIT
+    assert seen["limit"] > 64 * 1024
