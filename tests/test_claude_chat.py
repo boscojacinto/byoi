@@ -112,6 +112,46 @@ def test_translator_permission_and_result():
     assert "turn" in kinds
 
 
+def test_permission_survives_reconnect_and_resolves():
+    # A guest reconnecting (page reload, phone screen lock) while a tool
+    # permission ask is pending must still see it in the snapshot's history --
+    # otherwise Claude sits blocked on an approval nobody can answer anymore.
+    from apps.seat.claude_chat import ClaudeChat
+
+    async def run():
+        class Stdin:
+            def write(self, _data):
+                return None
+
+            async def drain(self):
+                return None
+
+        class Proc:
+            stdin = Stdin()
+
+        chat = ClaudeChat()
+        chat._proc = Proc()  # type: ignore[assignment]
+        [event] = chat.translator.feed(
+            {
+                "type": "control_request",
+                "request_id": "req-9",
+                "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "rm -rf /"}},
+            }
+        )
+        chat._remember(event)
+        # A reconnecting client rebuilds its view from exactly this list.
+        pending = chat.snapshot()["history"]
+        assert any(h["type"] == "permission" and h["request_id"] == "req-9" for h in pending)
+
+        await chat.answer_permission("req-9", True)
+        return chat.snapshot()["history"]
+
+    history = asyncio.run(run())
+    stored = next(h for h in history if h["type"] == "permission")
+    assert stored["resolved"] == "allowed"
+    assert stored["name"] == "Bash"  # answering must not blank out the card's own fields
+
+
 def test_translator_ignores_replayed_user_text():
     t = GuestTranslator()
     assert t.feed({"type": "user", "message": {"content": [{"type": "text", "text": "hi"}]}}) == []

@@ -489,14 +489,15 @@ function applyChatEvent(msg) {
     return;
   }
   if (kind === "permission") {
-    upsert({
-      id: msg.request_id || uid(),
-      kind: "permission",
-      requestId: msg.request_id,
-      name: msg.name,
-      detail: msg.detail || "",
-      diff: msg.diff,
-    });
+    // A resolve-only broadcast (after Allow/Deny) carries just request_id and
+    // resolved — spreading undefined name/detail/diff over the stored item
+    // would blank out the card, so only merge fields that are actually present.
+    const item = { id: msg.request_id || uid(), kind: "permission", requestId: msg.request_id };
+    if (msg.name !== undefined) item.name = msg.name;
+    if (msg.detail !== undefined) item.detail = msg.detail;
+    if (msg.diff !== undefined) item.diff = msg.diff;
+    if (msg.resolved !== undefined) item.resolved = msg.resolved;
+    upsert(item);
     render();
     return;
   }
@@ -589,7 +590,9 @@ function ensureTimer() {
 }
 
 function fromHistory(item) {
-  return { ...item, kind: item.kind || item.type, done: true };
+  const kind = item.kind || item.type;
+  const requestId = kind === "permission" ? item.requestId || item.request_id : item.requestId;
+  return { ...item, kind, requestId, done: true };
 }
 
 function upsert(item) {

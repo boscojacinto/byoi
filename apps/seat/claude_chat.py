@@ -529,7 +529,7 @@ class GuestTranslator:
 
 def _history_item(event: dict[str, Any]) -> dict[str, Any] | None:
     kind = event.get("type")
-    if kind in {"user", "assistant", "thinking", "tool", "ask", "todos"}:
+    if kind in {"user", "assistant", "thinking", "tool", "ask", "todos", "permission"}:
         item = dict(event)
         item.pop("delta", None)
         if kind == "assistant":
@@ -835,6 +835,11 @@ class ClaudeChat:
             return
         payload = self.translator.pop_permission_input(request_id)
         await self._write(encode_permission(request_id, allow, payload))
+        resolved = "allowed" if allow else "denied"
+        for item in self._history:
+            if item.get("type") == "permission" and item.get("request_id") == request_id:
+                item["resolved"] = resolved
+        await self._broadcast({"type": "permission", "request_id": request_id, "resolved": resolved})
 
     def refresh_quota(self) -> dict[str, Any] | None:
         if self.config_dir is None:
@@ -1057,9 +1062,10 @@ class ClaudeChat:
         if not item:
             return
         kind = item.get("type")
-        if kind in {"tool", "ask", "assistant", "thinking"}:
+        key = "request_id" if kind == "permission" else "id"
+        if kind in {"tool", "ask", "assistant", "thinking", "permission"}:
             for existing in self._history:
-                if existing.get("type") == kind and existing.get("id") == item.get("id"):
+                if existing.get("type") == kind and existing.get(key) == item.get(key):
                     if item.get("delta"):
                         existing["text"] = (existing.get("text") or "") + (item.get("text") or "")
                         existing["done"] = item.get("done")
