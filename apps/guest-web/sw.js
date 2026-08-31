@@ -1,9 +1,10 @@
-const CACHE = "byoi-guest-v13";
+const CACHE = "byoi-guest-v14";
 const ASSETS = [
   "/guest/",
   "/guest/index.html",
   "/guest/guest.css",
   "/guest/guest.js",
+  "/guest/highlight.js",
   "/guest/manifest.json",
   "/guest/icon.png",
 ];

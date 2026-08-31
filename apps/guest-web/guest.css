@@ -521,9 +521,28 @@ input[type="text"], input[type="url"] {
   tab-size: 2;
 }
 .dl .sign { display: inline-block; width: 1.1rem; padding-left: 0.35rem; opacity: 0.75; }
-.dl.add { background: #16311f; color: #b7e0c2; }
-.dl.del { background: #35201c; color: #f0b4a8; }
+/* The tint carries added/removed; the syntax colours sit on top of it, so the
+   text keeps only a hint of green or red and the tokens stay legible. */
+.dl.add { background: #16311f; color: #cfe6d5; }
+.dl.del { background: #35201c; color: #ecd0c8; }
+.dl.add .sign { color: #7fd3b0; }
+.dl.del .sign { color: #f0a6c0; }
 .dl.skip { color: #7c6a58; padding-left: 0.6rem; }
+
+/* One palette for every dark surface: the terminal ground, and the green and
+   red diff tints it also has to stay readable on. */
+.tk-c { color: #9c8b78; font-style: italic; }
+.tk-k { color: #f0a6c0; }
+.tk-s { color: #d9c07a; }
+.tk-n { color: #d99a6c; }
+.tk-f { color: #8fc9e8; }
+.tk-t { color: #7fd3b0; }
+.tk-l { color: #c9a6f0; }
+.tk-v { color: #e8d5bc; }
+.tk-p { color: #a99c8c; }
+.tk-add { color: #b7e0c2; }
+.tk-del { color: #f0b4a8; }
+.ln { color: #6f6152; user-select: none; }
 .copy {
   background: none;
   border: 0;

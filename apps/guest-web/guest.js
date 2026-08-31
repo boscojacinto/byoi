@@ -96,6 +96,17 @@ function escapeHtml(text) {
     .replace(/"/g, "&quot;");
 }
 
+// highlight.js is precached with the rest of the app, but a phone that opened
+// the PWA mid-deploy could be running an older cache — fall back to plain text
+// rather than losing the message.
+function hl(code, lang) {
+  return window.HL ? window.HL.highlight(code, lang) : escapeHtml(code);
+}
+
+function hlLang(path) {
+  return window.HL ? window.HL.langFromPath(path) : "";
+}
+
 function inlineMarkdown(raw) {
   let html = escapeHtml(raw);
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -118,7 +129,7 @@ function codeBlockHTML(chunk) {
   const body = (nl === -1 ? chunk : chunk.slice(nl + 1)).replace(/\n+$/, "");
   return `<div class="code">
     <div class="code-bar"><span class="lang">${escapeHtml(lang || "code")}</span><button type="button" class="copy">Copy</button></div>
-    <pre class="term"><code>${escapeHtml(body)}</code></pre>
+    <pre class="term"><code>${hl(body, lang)}</code></pre>
   </div>`;
 }
 
@@ -948,20 +959,34 @@ function statBadge(added, removed) {
   return `<span class="stat">${plus}${minus}</span>`;
 }
 
+const diffHtmlCache = new Map();
+
 function diffHTML(msg) {
   const diff = diffOf(msg);
   if (!diff) return "";
+  const path = msg.diff.path || "";
+  // The whole log re-renders on every streamed token, so colouring a hunk once
+  // and keeping the string matters more here than anywhere else.
+  const key = `${msg.id}:${(msg.diff.old || "").length}:${(msg.diff.new || "").length}:${path}`;
+  const cached = diffHtmlCache.get(key);
+  if (cached) return cached;
+  const lang = hlLang(path);
   const rows = (diff.coarse ? diff.rows : trimContext(diff.rows)).slice(0, 500);
   const body = rows
     .map((row) => {
       if (row.t === "…") return `<div class="dl skip">⋯</div>`;
       const cls = row.t === "+" ? "add" : row.t === "-" ? "del" : "same";
       const sign = row.t === " " ? " " : row.t;
-      return `<div class="dl ${cls}"><span class="sign">${sign}</span>${escapeHtml(row.s) || "&nbsp;"}</div>`;
+      // A hunk is not a whole file, so each line is coloured on its own: a
+      // string or comment left open by the cut cannot bleed into the rest.
+      return `<div class="dl ${cls}"><span class="sign">${sign}</span>${hl(row.s, lang) || "&nbsp;"}</div>`;
     })
     .join("");
-  const path = msg.diff.path ? `<div class="diff-path">${escapeHtml(msg.diff.path)}</div>` : "";
-  return `<div class="diff">${path}<div class="diff-body">${body}</div></div>`;
+  const head = path ? `<div class="diff-path">${escapeHtml(path)}</div>` : "";
+  const html = `<div class="diff">${head}<div class="diff-body">${body}</div></div>`;
+  if (diffHtmlCache.size > 120) diffHtmlCache.clear();
+  diffHtmlCache.set(key, html);
+  return html;
 }
 
 // A shipped pull request or commit is the outcome of a visit, not a line of
@@ -988,10 +1013,35 @@ function outcomeHTML(msg) {
   return cards.join("");
 }
 
+const GUTTER = /^(\s*\d+(?:→|\t|\|))(.*)$/;
+
+// A Read is a file, so colour it like one. Claude Code prefixes each line with
+// its number ("  12→code"); that gutter stays plain so it reads as a margin
+// rather than as part of the code.
+function outputHTML(msg) {
+  const raw = isNoise(msg.output) ? "" : msg.output || "";
+  if (!raw) return "";
+  const body = raw.slice(0, 32000);
+  const isFile = msg.name === "Read" || msg.name === "NotebookRead";
+  const lang = isFile ? hlLang(msg.input?.file_path || msg.input?.path || msg.detail) : "";
+  if (!lang) return `<pre class="term">${escapeHtml(body)}</pre>`;
+  const lines = body.split("\n");
+  if (!lines.some((line) => GUTTER.test(line))) {
+    return `<pre class="term">${hl(body, lang)}</pre>`;
+  }
+  const marked = lines
+    .map((line) => {
+      const parts = line.match(GUTTER);
+      if (!parts) return hl(line, lang);
+      return `<span class="ln">${escapeHtml(parts[1])}</span>${hl(parts[2], lang)}`;
+    })
+    .join("\n");
+  return `<pre class="term">${marked}</pre>`;
+}
+
 function toolBodyHTML(msg) {
   const diff = diffHTML(msg);
-  const raw = isNoise(msg.output) ? "" : msg.output || "";
-  const out = raw ? `<pre class="term">${escapeHtml(raw.slice(0, 32000))}</pre>` : "";
+  const out = outputHTML(msg);
   if (!diff && !out) {
     return msg.status === "running" ? "" : `<div class="tool-empty">No output.</div>`;
   }
