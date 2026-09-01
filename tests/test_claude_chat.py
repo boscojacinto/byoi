@@ -595,6 +595,46 @@ def test_an_operator_can_explicitly_disable_the_default(monkeypatch):
     assert "--allowedTools" not in argv
 
 
+# --- what every seat session is told --------------------------------------
+
+
+def test_a_seat_is_told_what_it_cannot_work_out_from_inside(monkeypatch):
+    """Measured on a real visit.
+
+    A guest asked to push finished work. The push was denied by the Bash
+    classifier before any control request was emitted, so no card reached the
+    phone -- and the seat read the silence as a prompt awaiting approval and
+    told the guest twice to approve something that could never appear. A skill
+    only helps if it is loaded; this rides on every request.
+    """
+    monkeypatch.delenv("BYOI_SEAT_SYSTEM", raising=False)
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: True)
+    argv = claude_chat.claude_argv()
+    system = argv[argv.index("--append-system-prompt") + 1]
+
+    assert "no prompt for anyone to approve" in system
+    assert "Never tell the guest to approve" in system
+    assert 'tapping "I\'m done"' in system
+    assert "Never `git push`" in system
+
+
+def test_an_operator_can_drop_the_seat_system_prompt(monkeypatch):
+    monkeypatch.setenv("BYOI_SEAT_SYSTEM", "")
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: True)
+    assert "--append-system-prompt" not in claude_chat.claude_argv()
+
+
+def test_a_branch_the_guest_makes_is_a_branch_they_can_switch_to():
+    """`git branch <name>` was allowlisted and `git checkout` was not, so a
+    guest could create a branch and then not move onto it. Neither needs a
+    credential or reaches outside the project."""
+    tools = claude_chat.DEFAULT_ALLOWED_TOOLS
+    assert "Bash(git checkout *)" in tools
+    assert "Bash(git switch *)" in tools
+    # Push stays off: the seat holds no git credential, deliberately.
+    assert "git push" not in tools
+
+
 # --- the seat's own MCP servers (the headless browser) ----------------------
 
 

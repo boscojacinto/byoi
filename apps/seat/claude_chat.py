@@ -143,11 +143,50 @@ DEFAULT_ALLOWED_TOOLS = (
     "Bash(yarn *) Bash(pnpm *) Bash(bun run *) Bash(bun install) Bash(bun test) "
     "Bash(git status) Bash(git diff *) Bash(git log *) Bash(git add *) "
     "Bash(git commit *) Bash(git branch *) Bash(git show *) "
+    # `git branch <name>` without these creates a branch the guest cannot then
+    # switch to, which is how a real visit ended: the seat's Claude read the
+    # silent denial as a prompt awaiting approval and told the guest twice to
+    # approve something that was never going to appear. Both are local, need no
+    # credential, and reach nothing outside the project.
+    "Bash(git checkout *) Bash(git switch *) "
     "Bash(pytest *) Bash(python -m pytest *) Bash(python3 -m pytest *) "
     "Bash(pip install *) Bash(pip3 install *) "
     "Bash(make *) Bash(cargo build *) Bash(cargo test *) Bash(go build *) Bash(go test *) "
     "mcp__browser"
 )
+
+
+# Three things a seat's Claude cannot work out from inside the sandbox, and
+# gets wrong in a way that costs the guest their visit rather than a turn.
+#
+# The third is not hypothetical. A guest asked to push their finished work; the
+# push was refused before any control request was emitted, and the seat read
+# that as a prompt awaiting approval -- so it told them, twice, to approve
+# something that was never going to appear, at the end of an otherwise finished
+# brief. A skill only helps if it is loaded; this is in every request.
+SEAT_SYSTEM = (
+    "You are Claude Code on a BYOI salon seat. The person you are talking to is "
+    "on their phone, in a cafe, on a visit with a time limit.\n"
+    "- Bash is restricted to an allowlist. Anything off it is denied by Claude "
+    "Code's own safety classifier BEFORE any approval request is emitted, so "
+    "there is no card on the guest's phone and no prompt for anyone to approve. "
+    "Never tell the guest to approve, allow, or re-try a blocked command; say "
+    "what you cannot do and what you will do instead. `npm run <script>` is "
+    "allowlisted, so prefer it over npx or a node_modules/.bin binary.\n"
+    "- The guest ships by tapping \"I'm done\" in their app, which pins their "
+    "tree to a ref the desk fetches. Never `git push`: the seat holds no git "
+    "credential by design. Committing locally is fine and encouraged.\n"
+    "- If mcp__browser__* tools are present you have a headless browser. Use it "
+    "to check a page you changed: browser_snapshot for structure, "
+    "browser_take_screenshot when the question is visual. The guest sees your "
+    "screenshots in the chat."
+)
+
+
+def seat_system_prompt() -> str:
+    """Extra system prompt for a guest seat. Empty turns it off."""
+    raw = os.environ.get("BYOI_SEAT_SYSTEM")
+    return SEAT_SYSTEM if raw is None else raw
 
 
 def seat_mcp_config() -> Path | None:
@@ -213,6 +252,9 @@ def claude_argv() -> list[str]:
         tools = DEFAULT_ALLOWED_TOOLS
     if tools.strip():
         argv.extend(["--allowedTools", tools])
+    system = seat_system_prompt()
+    if system.strip() and supports_flag(binary, "--append-system-prompt"):
+        argv.extend(["--append-system-prompt", system])
     mcp = seat_mcp_config()
     if mcp is not None and supports_flag(binary, "--mcp-config"):
         argv.extend(["--mcp-config", str(mcp)])

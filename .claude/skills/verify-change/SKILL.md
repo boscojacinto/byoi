@@ -45,6 +45,29 @@ If the project has no script that does what you need (no `lint` entry, no
 typecheck step), say so plainly in your summary instead of inventing a raw
 command — it will be silently denied and you'll waste turns discovering that.
 
+## Shipping: never `git push`
+
+**A guest ships by tapping "I'm done", not by pushing.** The seat pins their
+tree to `refs/byoi/submissions/<session>` without touching their HEAD, index or
+branches (`apps/seat/submission.py`), and the desk fetches that ref to grade it.
+Deploys work the same way: the desk runs `vercel` with its own token, from its
+own checkout, at a moment when no guest code is running.
+
+So `git push` is off the allowlist and stays off. That is not an oversight to
+work around — the seat holds no git credential *by design*, because a guest's
+Claude has Bash and would be able to read it. A push would fail on
+authentication even if the classifier let it through.
+
+`git status`, `diff`, `log`, `show`, `add`, `commit`, `branch`, `checkout` and
+`switch` are all allowlisted. Commit freely; local branches are fine.
+
+**When a git command is refused, do not tell the guest to approve a prompt.**
+There is no prompt — see the classifier note above; the refusal happened before
+anything could be shown on their phone, and no amount of approving will produce
+it. Saying otherwise strands the guest at the end of their visit tapping at
+something that does not exist. Say what actually ships their work instead:
+finish the commit, then **"I'm done"** in their app.
+
 ## Looking at the rendered page
 
 `curl` is still blocked and always will be. There is a headless browser
