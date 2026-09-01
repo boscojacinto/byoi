@@ -79,3 +79,22 @@ def test_set_project_vercel_is_first_write_wins(tmp_path):
     row = store.project(proj["id"])
     assert row["vercel_project_id"] == "prj_1"
     assert row["vercel_org_id"] == "org_1"
+
+
+def test_set_project_infra_round_trips_and_replaces(tmp_path):
+    store = Store(tmp_path / "salon.db")
+    site = tmp_path / "site"
+    site.mkdir()
+    proj = store.add_project(name="site", local_path=str(site))
+
+    assert store.project(proj["id"])["infra_resources"] == []
+
+    first = [{"kind": "postgres", "provider": "neon", "id": "prj_1", "env": {"DATABASE_URL": "x"}}]
+    store.set_project_infra(proj["id"], first)
+    assert store.project(proj["id"])["infra_resources"] == first
+
+    # Unlike the Vercel linkage, infra is replaced wholesale by the caller's
+    # already-merged list — the next deploy adding redis on top of postgres.
+    merged = first + [{"kind": "redis", "provider": "upstash", "id": "db_1", "env": {"REDIS_URL": "y"}}]
+    store.set_project_infra(proj["id"], merged)
+    assert store.project(proj["id"])["infra_resources"] == merged

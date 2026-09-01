@@ -173,8 +173,10 @@ def run(
     source: str,
     ref: str,
     production: bool = False,
+    project_id: str | None = None,
     vercel_project_id: str | None = None,
     vercel_org_id: str | None = None,
+    db_resources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Fetch the pinned ref, provision, deploy. Returns url/resources/notes.
 
@@ -182,6 +184,12 @@ def run(
     already deployed once), the new build is linked onto that same Vercel
     project rather than minting a new one — so every guest who works this
     desk project, across however many solutions, ships to one place.
+
+    `db_resources` is that same desk project's already-provisioned Postgres /
+    Redis / auth secret, if any. Whatever `needs` it already covers is reused
+    as-is — the returned `resources` combines the two — so the guest's app
+    keeps writing to the same database its predecessor set up, instead of a
+    fresh empty one appearing on every deploy.
     """
     if not shutil.which(vercel_bin()):
         raise DeployError(f"{vercel_bin()} is not on PATH on the desk")
@@ -199,9 +207,13 @@ def run(
     if vercel_project_id and vercel_org_id:
         write_project_link(dest, project_id=vercel_project_id, org_id=vercel_org_id)
 
-    resources, notes = provisioning.provision(
-        session_id=session_id, needs=list(detected.get("needs") or [])
+    existing_infra = list(db_resources or [])
+    new_infra, notes = provisioning.provision(
+        owner_id=project_id or session_id,
+        needs=list(detected.get("needs") or []),
+        existing=existing_infra,
     )
+    resources = existing_infra + new_infra
     env = provisioning.env_from(resources)
 
     proc = _run(
@@ -212,8 +224,9 @@ def run(
     stdout = _redact(proc.stdout or "", token)
     stderr = _redact(proc.stderr or "", token)
     if proc.returncode != 0:
-        # Don't strand what we just created if the deploy itself failed.
-        problems = provisioning.destroy(resources)
+        # Roll back only what this call created — the project's carried-over
+        # infra was here before this deploy and must survive it failing.
+        problems = provisioning.destroy(new_infra)
         detail = (stderr or stdout or f"vercel exited {proc.returncode}").strip()[-800:]
         if problems:
             detail += " | cleanup: " + "; ".join(problems)
@@ -221,7 +234,7 @@ def run(
 
     match = URL_RE.search(stdout) or URL_RE.search(stderr)
     if not match:
-        provisioning.destroy(resources)
+        provisioning.destroy(new_infra)
         raise DeployError("vercel did not print a deployment URL")
 
     ids = project_info(dest)
@@ -244,12 +257,11 @@ def run(
 
 
 def teardown(deployment: dict[str, Any]) -> dict[str, Any]:
-    """Remove this build's preview deployment and destroy its managed
-    infrastructure. Best effort.
+    """Remove this build's preview deployment. Best effort.
 
-    The Vercel project itself is not touched here — it belongs to the desk
-    project, not this session, and outlives whichever guest happened to
-    trigger this deploy.
+    Nothing provisioned is touched here: the Vercel project and its managed
+    Postgres/Redis/auth secret all belong to the desk project, not this
+    session, and outlive whichever guest happened to trigger this deploy.
     """
     problems: list[str] = []
     url = deployment.get("url")
@@ -266,6 +278,4 @@ def teardown(deployment: dict[str, Any]) -> dict[str, Any]:
                 )
         except DeployError as exc:
             problems.append(str(exc))
-    resources = deployment.get("resources") or []
-    problems.extend(provisioning.destroy(resources))
     return {"ok": not problems, "problems": problems}

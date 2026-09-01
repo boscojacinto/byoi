@@ -732,11 +732,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 session_id=session_id,
                 source=str(source),
                 ref=str(ref),
+                project_id=desk_project_id,
                 # Every solution on the same desk project lands on the same
                 # Vercel project — None on the first deploy, which lets
                 # `vercel deploy` mint one.
                 vercel_project_id=project.get("vercel_project_id"),
                 vercel_org_id=project.get("vercel_org_id"),
+                # And the same managed Postgres/Redis/auth secret, so the data
+                # a guest's app writes is still there for whoever deploys this
+                # project next.
+                db_resources=project.get("infra_resources"),
             )
         except (DeployError, SeatSyncError) as exc:
             store.update_deployment(deployment_id, state="failed", detail=str(exc)[:1000])
@@ -750,6 +755,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 vercel_project_id=result["vercel_project_id"],
                 vercel_org_id=result["vercel_org_id"],
             )
+        if desk_project_id and result.get("resources") is not None:
+            store.set_project_infra(desk_project_id, result["resources"])
         store.update_deployment(
             deployment_id,
             state="ready",

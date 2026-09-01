@@ -61,6 +61,8 @@ const state = {
   sheet: null,
   installable: false,
   floorTab: "session",
+  // Which project's task list is expanded on the Solutions tab.
+  openProject: "",
   preview: "",
   files: null,
   filePath: "",
@@ -1544,6 +1546,48 @@ function joinHTML() {
   </div>`;
 }
 
+// Solutions come off the board as individual tasks, but a task's project
+// is what deploys and what a guest can be locked out of — so the guest
+// picks a project first, then a task within it, rather than tasks flat.
+function taskCardHTML(item, session, locked) {
+  return `<article class="brief nested">
+    <h4>${escapeHtml(item.title)}</h4>
+    <p>${escapeHtml(item.brief)}</p>
+    <p class="pill">${item.wellness_minutes} min · break at ${item.break_after}</p>
+    <button class="btn ghost small" data-claim="${escapeHtml(item.id)}" ${!session || state.busy || locked ? "disabled" : ""}>Choose</button>
+  </article>`;
+}
+
+function solutionsHTML(board, session) {
+  const groups = new Map();
+  const solo = [];
+  for (const item of board) {
+    if (!item.project) {
+      solo.push(item);
+      continue;
+    }
+    const key = item.project.id;
+    if (!groups.has(key)) groups.set(key, { project: item.project, busy: !!item.project_busy, items: [] });
+    groups.get(key).items.push(item);
+  }
+  const projectCards = [...groups.values()]
+    .map((group) => {
+      const open = state.openProject === group.project.id;
+      const count = group.items.length;
+      return `<article class="brief project-group${group.busy ? " busy" : ""}">
+        <h3>${escapeHtml(group.project.name)}</h3>
+        <p class="pill">${count} task${count === 1 ? "" : "s"}${group.busy ? " · another guest is on this project" : ""}</p>
+        <button type="button" class="btn ghost small" data-project="${escapeHtml(group.project.id)}" ${group.busy ? "disabled" : ""}>
+          ${open ? "Hide tasks" : "Choose project"}
+        </button>
+        ${open ? group.items.map((item) => taskCardHTML(item, session, group.busy)).join("") : ""}
+      </article>`;
+    })
+    .join("");
+  const soloCards = solo.map((item) => taskCardHTML(item, session, false)).join("");
+  return projectCards + soloCards;
+}
+
 function floorHTML() {
   const session = state.join?.session;
   const seat = state.join?.seat;
@@ -1552,16 +1596,7 @@ function floorHTML() {
   const hello = session
     ? `${seat?.name || "Seat"} · hello ${escapeHtml(session.coder_name || "")}`
     : "Checked in at the desk? Scan the slip QR.";
-  const briefs = board
-    .map(
-      (item) => `<article class="brief">
-        <h3>${escapeHtml(item.title)}</h3>
-        <p>${escapeHtml(item.brief)}</p>
-        <p class="pill">${item.wellness_minutes} min · break at ${item.break_after}${item.project ? ` · ${escapeHtml(item.project.name)}` : ""}</p>
-        <button class="btn ghost small" data-claim="${escapeHtml(item.id)}" ${!session || state.busy ? "disabled" : ""}>Choose</button>
-      </article>`
-    )
-    .join("");
+  const briefs = solutionsHTML(board, session);
   const tab = state.floorTab === "solutions" ? "solutions" : "session";
   const sessionPanel = `
     ${
@@ -1967,6 +2002,13 @@ function bind() {
   }
   document.querySelectorAll("[data-claim]").forEach((btn) => {
     btn.onclick = () => claim(btn.getAttribute("data-claim"));
+  });
+  document.querySelectorAll("[data-project]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.getAttribute("data-project");
+      state.openProject = state.openProject === id ? "" : id;
+      render();
+    };
   });
   const back = $("#back");
   if (back) back.onclick = goBack;

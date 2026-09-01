@@ -332,6 +332,59 @@ function quotaLabel(quota) {
   return bits.join(" · ");
 }
 
+// Solutions are individual tasks, but a project is the unit that deploys and
+// the unit a guest gets locked into — so the desk lists tasks grouped under
+// their project rather than flat, matching how a guest picks one.
+function boardTaskRowHTML(item, occ) {
+  const taken = occ.some((s) => s.session.board_id === item.id);
+  return `<article class="q-item nested">
+    <span class="mark ${taken ? "live" : ""}">${taken ? "●" : "✓"}</span>
+    <div>
+      <strong>${taken ? "Live" : "Next"}: ${escapeHtml(item.title)}</strong>
+      <p class="quiet">${item.wellness_minutes} min</p>
+    </div>
+  </article>`;
+}
+
+function boardGroupsHTML(items, occ) {
+  const groups = new Map();
+  const solo = [];
+  for (const item of items) {
+    if (!item.project) {
+      solo.push(item);
+      continue;
+    }
+    const key = item.project.id;
+    if (!groups.has(key)) groups.set(key, { project: item.project, busy: !!item.project_busy, items: [] });
+    groups.get(key).items.push(item);
+  }
+  const projectBlocks = [...groups.values()]
+    .map((group) => {
+      const count = group.items.length;
+      return `<article class="q-group${group.busy ? " busy" : ""}">
+        <div class="q-group-head">
+          <strong>${escapeHtml(group.project.name)}</strong>
+          <span class="quiet">${count} task${count === 1 ? "" : "s"}${group.busy ? " · in progress" : ""}</span>
+        </div>
+        ${group.items.map((item) => boardTaskRowHTML(item, occ)).join("")}
+      </article>`;
+    })
+    .join("");
+  const soloRows = solo
+    .map((item) => {
+      const taken = occ.some((s) => s.session.board_id === item.id);
+      return `<article class="q-item">
+        <span class="mark ${taken ? "live" : ""}">${taken ? "●" : "✓"}</span>
+        <div>
+          <strong>${taken ? "Live" : "Next"}: ${escapeHtml(item.title)}</strong>
+          <p class="quiet">No project yet · ${item.wellness_minutes} min</p>
+        </div>
+      </article>`;
+    })
+    .join("");
+  return projectBlocks + soloRows;
+}
+
 async function refresh() {
   const [{ seats }, { items }, proj, tpl, health, accounts, live] = await Promise.all([
     api("/api/seats"),
@@ -407,19 +460,7 @@ async function refresh() {
     };
   });
 
-  $("board").innerHTML =
-    items
-      .map((i) => {
-        const taken = occ.some((s) => s.session.board_id === i.id);
-        return `<article class="q-item">
-        <span class="mark ${taken ? "live" : ""}">${taken ? "●" : "✓"}</span>
-        <div>
-          <strong>${taken ? "Live" : "Next"}: ${escapeHtml(i.title)}</strong>
-          <p class="quiet">${escapeHtml(i.project ? i.project.name : "No project yet")} · ${i.wellness_minutes} min</p>
-        </div>
-      </article>`;
-      })
-      .join("") || `<p class="quiet">No solutions yet.</p>`;
+  $("board").innerHTML = boardGroupsHTML(items, occ) || `<p class="quiet">No solutions yet.</p>`;
 
   const sel = $("seatSel");
   sel.innerHTML = open.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("");

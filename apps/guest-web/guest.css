@@ -196,6 +196,14 @@ input[type="text"], input[type="url"] {
 }
 .brief h3 { margin: 0; font-size: 1.02rem; }
 .brief p { margin: 0.4rem 0 0; color: var(--muted); line-height: 1.4; }
+.brief.project-group.busy { opacity: 0.6; }
+.brief.nested {
+  border-top: 1px dashed var(--rule);
+  margin-top: 0.7rem;
+  padding: 0.7rem 0 0 0.8rem;
+}
+.brief.nested h4 { margin: 0; font-size: 0.95rem; }
+.brief.nested p { margin: 0.35rem 0 0; color: var(--muted); line-height: 1.35; }
 
 .topbar {
   display: flex;
