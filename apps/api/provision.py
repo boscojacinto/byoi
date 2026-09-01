@@ -1,4 +1,5 @@
-"""Managed Postgres and Redis for a deploy, created and destroyed per session.
+"""Managed Postgres and Redis for a deploy, provisioned once per desk project
+and carried over to every guest who deploys it after that.
 
 Only the desk ever holds these tokens. The seat never sees them, and neither
 does the guest's Claude — provisioning happens after the tree has been pinned
@@ -34,20 +35,20 @@ def _token(name: str) -> str | None:
     return read_secret(name)
 
 
-def resource_name(session_id: str) -> str:
-    sid = "".join(c for c in (session_id or "").lower() if c.isalnum())[:12] or "seat"
-    return f"byoi-{sid}"
+def resource_name(owner_id: str) -> str:
+    oid = "".join(c for c in (owner_id or "").lower() if c.isalnum())[:12] or "seat"
+    return f"byoi-{oid}"
 
 
 # ----------------------------------------------------------------------- postgres
 
 
-def provision_postgres(session_id: str) -> dict[str, Any] | None:
-    """A Neon project per session. Returns None when no token is configured."""
+def provision_postgres(owner_id: str) -> dict[str, Any] | None:
+    """A Neon project per desk project. Returns None when no token is configured."""
     token = _token("BYOI_NEON_API_KEY")
     if not token:
         return None
-    name = resource_name(session_id)
+    name = resource_name(owner_id)
     try:
         with httpx.Client(timeout=TIMEOUT) as client:
             res = client.post(
@@ -92,13 +93,13 @@ def destroy_postgres(resource: dict[str, Any]) -> None:
 # -------------------------------------------------------------------------- redis
 
 
-def provision_redis(session_id: str) -> dict[str, Any] | None:
-    """An Upstash Redis database per session. Returns None without a token."""
+def provision_redis(owner_id: str) -> dict[str, Any] | None:
+    """An Upstash Redis database per desk project. Returns None without a token."""
     email = _token("BYOI_UPSTASH_EMAIL")
     key = _token("BYOI_UPSTASH_API_KEY")
     if not (email and key):
         return None
-    name = resource_name(session_id)
+    name = resource_name(owner_id)
     region = os.environ.get("BYOI_UPSTASH_REGION", "us-east-1").strip() or "us-east-1"
     try:
         with httpx.Client(timeout=TIMEOUT) as client:
@@ -143,13 +144,14 @@ def destroy_redis(resource: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- auth
 
 
-def provision_auth(session_id: str) -> dict[str, Any]:
-    """No vendor call: auth just needs a per-deploy secret nobody else holds."""
+def provision_auth(owner_id: str) -> dict[str, Any]:
+    """No vendor call: auth just needs a secret, generated once and then
+    reused so it does not invalidate cookies on every redeploy."""
     return {
         "kind": "auth",
         "provider": "local",
         "id": None,
-        "name": resource_name(session_id),
+        "name": resource_name(owner_id),
         "env": {"AUTH_SECRET": secrets.token_urlsafe(32), "AUTH_TRUST_HOST": "true"},
     }
 
@@ -162,17 +164,28 @@ PROVISIONERS = {
 DESTROYERS = {"postgres": destroy_postgres, "redis": destroy_redis}
 
 
-def provision(*, session_id: str, needs: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Create what the project needs. Returns (resources, notes about anything skipped)."""
+def provision(
+    *, owner_id: str, needs: list[str], existing: list[dict[str, Any]] | None = None
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Create whatever `needs` isn't already covered by `existing`.
+
+    Returns only the newly created resources (not `existing`) — the caller
+    combines the two, and rolls back just the new ones if the deploy that
+    follows fails, leaving whatever was already provisioned for this project
+    untouched.
+    """
+    have = {r.get("kind") for r in (existing or [])}
     resources: list[dict[str, Any]] = []
     notes: list[str] = []
     for kind in needs or []:
+        if kind in have:
+            continue
         maker = PROVISIONERS.get(kind)
         if maker is None:
             notes.append(f"no provisioner for {kind}")
             continue
         try:
-            resource = maker(session_id)
+            resource = maker(owner_id)
         except ProvisionError as exc:
             notes.append(str(exc))
             continue

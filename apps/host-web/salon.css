@@ -157,6 +157,17 @@ h2 { margin: 0; font-size: 0.95rem; font-weight: 650; letter-spacing: 0.02em; }
   font-size: 0.7rem; flex: 0 0 auto; font-weight: 800;
 }
 .q-item .mark.live { background: var(--amber); }
+.q-group {
+  border: 1px solid rgba(61, 255, 138, 0.14);
+  border-radius: 12px;
+  padding: 0.6rem 0.75rem;
+  display: grid;
+  gap: 0.4rem;
+}
+.q-group.busy { border-color: rgba(224, 168, 92, 0.45); }
+.q-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
+.q-group-head strong { font-size: 0.9rem; }
+.q-item.nested { border: 0; background: transparent; padding: 0.1rem 0 0.1rem 0.3rem; }
 
 .live-card { display: flex; flex-direction: column; }
 .live-seats { display: flex; gap: 0.35rem; flex-wrap: wrap; }

@@ -40,7 +40,7 @@ from .deploy import DeployError
 from .seat_sync import SeatSyncError
 from .testgen import TestgenError
 from .slips import WIFI_SSID, compose_checkin_slip, public_base, public_host, save_join_qr, seat_join_url
-from .store import Store
+from .store import ProjectBusy, Store
 
 log = logging.getLogger("uvicorn.error")
 
@@ -508,6 +508,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             sess = store.claim(session_id, body.board_id)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except ProjectBusy as exc:
+            raise HTTPException(409, str(exc)) from exc
         item = store.board_item(body.board_id)
         project = (item or {}).get("project")
         path = (project or {}).get("local_path") if project else None
@@ -716,6 +718,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def _deploy_job(deployment_id: str, session_id: str, seat: dict | None, item: dict | None) -> None:
         project = (item or {}).get("project") or {}
         cwd = project.get("local_path")
+        desk_project_id = project.get("id")
         try:
             local_ok = bool(cwd) and Path(cwd).is_dir()
             info = seat_sync.submit_solution(
@@ -726,7 +729,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if not (ref and source):
                 raise DeployError("the seat did not pin a deployable ref")
             result = deploy_ops.run(
-                session_id=session_id, source=str(source), ref=str(ref)
+                session_id=session_id,
+                source=str(source),
+                ref=str(ref),
+                project_id=desk_project_id,
+                # Every solution on the same desk project lands on the same
+                # Vercel project — None on the first deploy, which lets
+                # `vercel deploy` mint one.
+                vercel_project_id=project.get("vercel_project_id"),
+                vercel_org_id=project.get("vercel_org_id"),
+                # And the same managed Postgres/Redis/auth secret, so the data
+                # a guest's app writes is still there for whoever deploys this
+                # project next.
+                db_resources=project.get("infra_resources"),
             )
         except (DeployError, SeatSyncError) as exc:
             store.update_deployment(deployment_id, state="failed", detail=str(exc)[:1000])
@@ -734,6 +749,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except Exception as exc:  # never leave the phone polling "running"
             store.update_deployment(deployment_id, state="failed", detail=str(exc)[:1000])
             return
+        if desk_project_id and result.get("vercel_project_id") and result.get("vercel_org_id"):
+            store.set_project_vercel(
+                desk_project_id,
+                vercel_project_id=result["vercel_project_id"],
+                vercel_org_id=result["vercel_org_id"],
+            )
+        if desk_project_id and result.get("resources") is not None:
+            store.set_project_infra(desk_project_id, result["resources"])
         store.update_deployment(
             deployment_id,
             state="ready",
