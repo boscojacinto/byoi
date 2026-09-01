@@ -717,6 +717,16 @@ input[type="text"], input[type="url"] {
   margin-top: 1rem;
   font-size: 0.85rem;
   color: var(--muted);
+  text-align: center;
+}
+
+.install button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--espresso);
+  font: inherit;
+  text-decoration: underline;
 }
 
 @media (display-mode: standalone) {

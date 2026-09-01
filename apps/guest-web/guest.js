@@ -59,6 +59,7 @@ const state = {
   // keyed "g:"/"t:"/"k:" + id. Absent means "use the default for that row".
   expanded: {},
   sheet: null,
+  installable: false,
   floorTab: "session",
   preview: "",
   files: null,
@@ -78,16 +79,84 @@ const state = {
   byoError: "",
 };
 
+// localStorage, not sessionStorage: a home-screen launch is a new browsing
+// session, so anything kept per-session is gone by the time the installed app
+// opens. What is kept is only ever this seat's OTP and unlock ticket, both of
+// which the seat replaces on the next guest's unlock, and both of which are
+// dropped the moment this guest leaves.
 function loadStore() {
   try {
-    return JSON.parse(sessionStorage.getItem(STORE) || "{}");
+    return JSON.parse(localStorage.getItem(STORE) || "{}");
   } catch {
     return {};
   }
 }
 
 function saveStore(patch) {
-  sessionStorage.setItem(STORE, JSON.stringify({ ...loadStore(), ...patch }));
+  try {
+    localStorage.setItem(STORE, JSON.stringify({ ...loadStore(), ...patch }));
+  } catch {
+    // Private mode, or a full quota. Resuming is a convenience, not the visit.
+  }
+}
+
+function clearStore() {
+  try {
+    localStorage.removeItem(STORE);
+  } catch {
+    // Nothing to do — the next boot reads {} either way.
+  }
+}
+
+// Chrome hands us the install prompt and expects us to hold it until the guest
+// asks; iOS never fires this and has no API, so there the offer is the sentence
+// Safari's own Share menu needs. Both are pointless once installed, which is
+// what the standalone check and guest.css's display-mode rule between them see
+// to.
+let installPrompt = null;
+
+const STANDALONE = () =>
+  window.matchMedia?.("(display-mode: standalone)").matches || window.navigator.standalone === true;
+
+const IOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+  state.installable = true;
+  render();
+});
+
+window.addEventListener("appinstalled", () => {
+  installPrompt = null;
+  state.installable = false;
+  render();
+});
+
+function installHTML() {
+  if (STANDALONE()) return "";
+  if (state.installable) {
+    return `<p class="install">Coming back to this seat? <button type="button" id="install">Add it to your home screen</button></p>`;
+  }
+  if (IOS()) {
+    return `<p class="install">Coming back to this seat? Share → Add to Home Screen.</p>`;
+  }
+  return "";
+}
+
+async function install() {
+  const offer = installPrompt;
+  if (!offer) return;
+  // The prompt is single-use whatever they answer, so let go of it either way
+  // rather than leaving a dead button on the floor.
+  installPrompt = null;
+  state.installable = false;
+  render();
+  try {
+    await offer.prompt();
+  } catch {
+    // Dismissed, or already installed in another tab. Nothing to say.
+  }
 }
 
 function escapeHtml(text) {
@@ -213,7 +282,11 @@ async function readJson(res, fallback) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = data.detail;
-    throw new Error(typeof detail === "string" ? detail : fallback || `HTTP ${res.status}`);
+    const err = new Error(typeof detail === "string" ? detail : fallback || `HTTP ${res.status}`);
+    // Kept so a caller can tell "this seat says no" from "this phone could not
+    // ask" — the difference between forgetting a visit and retrying it.
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -243,6 +316,10 @@ async function sit(otp) {
       state.view = params.get("view") === "chat" && state.ticket ? "chat" : "floor";
     }
   } catch (err) {
+    // 404 is a slip this seat has never heard of, 410 a visit already over:
+    // neither is worth resuming into on every launch. A blip on the Wi-Fi is,
+    // so that keeps the stored visit and tries again next time.
+    if (err.status === 404 || err.status === 410) clearStore();
     state.status = err.message || "Cannot reach this seat.";
     state.view = "join";
   } finally {
@@ -283,7 +360,7 @@ async function openChat() {
       body: JSON.stringify({ otp: state.otp, session_id: state.join?.session?.id }),
     });
     state.ticket = data.ticket || "";
-    saveStore({ ticket: state.ticket });
+    saveStore({ ticket: state.ticket, view: "chat" });
     state.view = "chat";
     state.status = "";
   } catch (err) {
@@ -1343,6 +1420,52 @@ function sheetHTML() {
   return "";
 }
 
+// One step back from wherever the guest is: the console overlay, then an open
+// sheet, then the chat itself. False means there was nothing left to close,
+// which is the back key's cue that back now means leaving.
+function goBack() {
+  const full = $("#term-full");
+  if (full && !full.hidden) {
+    full.hidden = true;
+    return true;
+  }
+  if (state.sheet) {
+    closeSheet();
+    return true;
+  }
+  if (state.view === "chat") {
+    state.leaveChat = true;
+    clearTimeout(state.reconnectTimer);
+    if (state.ws) state.ws.close();
+    state.view = "floor";
+    saveStore({ view: "floor" });
+    render();
+    return true;
+  }
+  return false;
+}
+
+// Installed, there is no browser chrome, so Android's back key is the only back
+// there is — and it pops history. This app never navigates, so its history is
+// one entry deep and the first press would close the whole thing, chat and all.
+// Keep one spare entry on the stack, spend it on goBack(), and re-arm until
+// there is nothing left to close; only then let the press through.
+function armBack() {
+  try {
+    history.pushState({ byoi: true }, "");
+  } catch {
+    // Nothing to arm with. Back keeps its default meaning, as it does today.
+  }
+}
+
+window.addEventListener("popstate", () => {
+  if (goBack()) {
+    armBack();
+    return;
+  }
+  history.back();
+});
+
 function render() {
   const app = $("#app");
   if (state.view === "chat" && $("#app .screen.chat")) {
@@ -1388,6 +1511,7 @@ function joinHTML() {
       ${state.status ? `<p class="status">${escapeHtml(state.status)}</p>` : ""}
       <button class="btn" id="sit" ${state.busy ? "disabled" : ""}>${state.busy ? "Sitting…" : "Sit"}</button>
     </div>
+    ${installHTML()}
   </div>`;
 }
 
@@ -1424,7 +1548,8 @@ function floorHTML() {
     ${session && claimed && claimed.project ? `<button class="btn ghost" id="deploy" ${state.deploying ? "disabled" : ""}>${state.deploying ? "Deploying…" : "Deploy preview"}</button>` : ""}
     ${deployHTML()}
     ${session ? `<button class="btn ghost" id="shipped">I'm done</button>` : ""}
-    <button class="btn ghost" id="leave">Leave</button>`;
+    <button class="btn ghost" id="leave">Leave</button>
+    ${installHTML()}`;
   const solutionsPanel = briefs || "<p class='lede'>Nothing on the board yet.</p>";
   return `<div class="screen floor">
     <header>
@@ -1774,11 +1899,14 @@ function bind() {
   const leave = $("#leave");
   if (leave) {
     leave.onclick = () => {
+      clearStore();
       state.view = "join";
       state.status = "Left the seat. Scan again to sit.";
       render();
     };
   }
+  const installBtn = $("#install");
+  if (installBtn) installBtn.onclick = install;
   const ship = $("#shipped");
   if (ship) ship.onclick = shipped;
   const byoBtn = $("#byo-start");
@@ -1819,24 +1947,7 @@ function bind() {
     btn.onclick = () => claim(btn.getAttribute("data-claim"));
   });
   const back = $("#back");
-  if (back) {
-    back.onclick = () => {
-      const full = $("#term-full");
-      if (full && !full.hidden) {
-        full.hidden = true;
-        return;
-      }
-      if (state.sheet) {
-        closeSheet();
-        return;
-      }
-      state.leaveChat = true;
-      clearTimeout(state.reconnectTimer);
-      if (state.ws) state.ws.close();
-      state.view = "floor";
-      render();
-    };
-  }
+  if (back) back.onclick = goBack;
   bindComposer();
   bindLog();
   bindSheet();
@@ -2086,10 +2197,13 @@ async function boot() {
   ensureTimer();
   window.visualViewport?.addEventListener("resize", fitViewport);
   window.addEventListener("resize", fitViewport);
+  armBack();
   const saved = loadStore();
   if (!state.otp && saved.otp) state.otp = saved.otp;
   if (!state.ticket && saved.ticket) state.ticket = saved.ticket;
-  if (params.get("view") === "chat" && state.ticket) {
+  // Either the app shell asked for chat, or this is the installed app opening
+  // on its start_url with a visit already in progress behind it.
+  if ((params.get("view") === "chat" || saved.view === "chat") && state.ticket) {
     state.view = "chat";
     render();
     connectChat();

@@ -1,4 +1,4 @@
-const CACHE = "byoi-guest-v14";
+const CACHE = "byoi-guest-v15";
 const ASSETS = [
   "/guest/",
   "/guest/index.html",

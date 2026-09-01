@@ -693,7 +693,20 @@ not run the desk on a shared login.
    diffs, todos, plan/code/auto/ask modes, slash commands (`/commit`,
    `/review`, `/model`, `/compact`, …), file mentions, photos, and stop.
 
-Add the PWA to the Home Screen for a full-screen chat next visit.
+The floor and the join screen offer **Add it to your home screen** as soon as
+the browser says the PWA is installable (iOS gets the Share-menu sentence
+instead, since Safari has no prompt to hold). The installed copy is the same
+app, and two things keep it that way rather than a worse one:
+
+* It launches on `start_url` with no `?otp=`, and a home-screen launch is a new
+  browsing session — so the seat's OTP, unlock ticket and last screen live in
+  `localStorage`, and tapping the icon mid-visit lands back in the chat. They
+  are dropped on **Leave**, and when the seat says the slip is unknown (404) or
+  the visit is over (410).
+* Installed there is no browser chrome, so Android's back key is the only back
+  there is. The app keeps one spare history entry and spends it on one step
+  back — console, sheet, chat — re-arming until there is nothing left to close;
+  only then does the press through and close the app.
 
 Freeing the seat in `ondemand` destroys the container, its workspace volume, its
 edge route, its Postgres and Redis, and its certificate — after revoking the
