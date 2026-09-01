@@ -60,7 +60,6 @@ const state = {
   expanded: {},
   sheet: null,
   floorTab: "session",
-  boardTimerId: null,
   preview: "",
   files: null,
   filePath: "",
@@ -594,23 +593,18 @@ function ensureTimer() {
   state.timerId = setInterval(tickTimer, 1000);
 }
 
-// Keeps the Solutions tab current as the desk publishes new briefs, without
-// re-rendering over a guest who is mid-type in an open sheet (e.g. the BYO
-// code form) or looking at the session tab, where a board change is noise.
-async function pollBoard() {
-  if (state.view !== "floor" || !state.join) return;
+// Refetched each time the guest opens the Solutions tab, so a brief the desk
+// publishes mid-visit shows up without a background poll running the whole
+// time the guest is on the floor screen.
+async function refreshBoard() {
+  if (!state.join) return;
   try {
     const data = await api("/api/board");
     state.join.board = data.items || [];
-    if (state.floorTab === "solutions" && !state.sheet) render();
   } catch {
-    // Quiet: the board just stays as it was until the next tick.
+    // Quiet: keep showing whatever the board already had.
   }
-}
-
-function ensureBoardPoll() {
-  if (state.boardTimerId) return;
-  state.boardTimerId = setInterval(pollBoard, 10000);
+  render();
 }
 
 function fromHistory(item) {
@@ -1804,6 +1798,7 @@ function bind() {
     btn.onclick = () => {
       state.floorTab = btn.getAttribute("data-tab");
       render();
+      if (state.floorTab === "solutions") refreshBoard();
     };
   });
   const floorMenu = $("#floor-menu");
@@ -2089,7 +2084,6 @@ async function boot() {
   }
   fitViewport();
   ensureTimer();
-  ensureBoardPoll();
   window.visualViewport?.addEventListener("resize", fitViewport);
   window.addEventListener("resize", fitViewport);
   const saved = loadStore();
