@@ -714,20 +714,13 @@ input[type="text"], input[type="url"] {
 .send.stop { background: var(--danger); }
 
 .install {
-  margin-top: 1rem;
-  font-size: 0.85rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
   color: var(--muted);
-  text-align: center;
 }
 
-.install button {
-  border: 0;
-  padding: 0;
-  background: none;
-  color: var(--espresso);
-  font: inherit;
-  text-decoration: underline;
-}
+.sheet .lede { margin: 0 0 0.9rem; font-size: 0.9rem; }
+.sheet .btn { margin-top: 0.5rem; }
 
 @media (display-mode: standalone) {
   .install { display: none; }

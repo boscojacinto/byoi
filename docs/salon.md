@@ -693,10 +693,15 @@ not run the desk on a shared login.
    diffs, todos, plan/code/auto/ask modes, slash commands (`/commit`,
    `/review`, `/model`, `/compact`, …), file mentions, photos, and stop.
 
-The floor and the join screen offer **Add it to your home screen** as soon as
-the browser says the PWA is installable (iOS gets the Share-menu sentence
-instead, since Safari has no prompt to hold). The installed copy is the same
-app, and two things keep it that way rather than a worse one:
+Once the browser says the PWA is installable, the floor raises a sheet —
+**Keep this seat on your phone** — over the session tab. It asks once a visit,
+and only on the floor: not on the join screen, where the guest is typing a code,
+and not in chat, where they are working. **Not now** dismisses it for the rest
+of the visit, and the floor's ⋯ menu keeps an **Add to home screen** entry for
+anyone who changes their mind. iOS gets the same sheet with Safari's
+Share-menu sentence in place of the button, since there is no prompt to hold
+there. The installed copy is the same app, and two things keep it that way
+rather than a worse one:
 
 * It launches on `start_url` with no `?otp=`, and a home-screen launch is a new
   browsing session — so the seat's OTP, unlock ticket and last screen live in

@@ -125,32 +125,52 @@ window.addEventListener("beforeinstallprompt", (event) => {
   installPrompt = event;
   state.installable = true;
   render();
+  offerInstall();
 });
 
 window.addEventListener("appinstalled", () => {
   installPrompt = null;
   state.installable = false;
+  if (state.sheet === "install") state.sheet = null;
   render();
 });
 
+// Somewhere to install from: Chrome's held prompt, or iOS, where there is no
+// prompt to hold and the offer is the sentence Safari's Share menu needs.
+function canInstall() {
+  return !STANDALONE() && (state.installable || IOS());
+}
+
+// Chrome fires beforeinstallprompt whenever it likes — often before the guest
+// has even sat down — so the offer waits for a moment that is not rude: on the
+// floor, with nothing else already open, and once per visit. The flag rides in
+// the store, which is cleared on Leave, so the next guest is asked afresh.
+function offerInstall() {
+  if (!canInstall() || state.sheet || state.view !== "floor") return;
+  if (loadStore().installOffered) return;
+  saveStore({ installOffered: true });
+  state.sheet = "install";
+  render();
+}
+
 function installHTML() {
-  if (STANDALONE()) return "";
-  if (state.installable) {
-    return `<p class="install">Coming back to this seat? <button type="button" id="install">Add it to your home screen</button></p>`;
-  }
-  if (IOS()) {
-    return `<p class="install">Coming back to this seat? Share → Add to Home Screen.</p>`;
-  }
-  return "";
+  const how = state.installable
+    ? `<button class="btn" id="install">Add to home screen</button>`
+    : `<p class="install">In Safari: <strong>Share</strong> → <strong>Add to Home Screen</strong>.</p>`;
+  return `<p class="lede">It opens full screen, without the browser bar — and straight back into this
+    session, so there is no code to type again.</p>
+    ${how}
+    <button class="btn ghost" id="install-later">Not now</button>`;
 }
 
 async function install() {
   const offer = installPrompt;
   if (!offer) return;
   // The prompt is single-use whatever they answer, so let go of it either way
-  // rather than leaving a dead button on the floor.
+  // rather than leaving a dead button behind.
   installPrompt = null;
   state.installable = false;
+  state.sheet = null;
   render();
   try {
     await offer.prompt();
@@ -325,6 +345,7 @@ async function sit(otp) {
   } finally {
     state.busy = false;
     render();
+    offerInstall();
   }
 }
 
@@ -1386,8 +1407,16 @@ function sheetHTML() {
             ? `Signed in as ${escapeHtml(state.byoEmail)}`
             : "Signed in · running on your account"
           : "Run this session on your own account instead of the salon's"
-      }</span></button>`
+      }</span></button>
+      ${
+        canInstall()
+          ? `<button type="button" class="item" id="menu-install">Add to home screen<span>Opens full screen, straight back into this session</span></button>`
+          : ""
+      }`
     );
+  }
+  if (state.sheet === "install") {
+    return sheetWrap("Keep this seat on your phone", installHTML());
   }
   if (state.sheet === "byo") {
     return sheetWrap("Your Claude account", byoHTML());
@@ -1540,7 +1569,6 @@ function joinHTML() {
       ${state.status ? `<p class="status">${escapeHtml(state.status)}</p>` : ""}
       <button class="btn" id="sit" ${state.busy ? "disabled" : ""}>${state.busy ? "Sitting…" : "Sit"}</button>
     </div>
-    ${installHTML()}
   </div>`;
 }
 
@@ -1577,8 +1605,7 @@ function floorHTML() {
     ${session && claimed && claimed.project ? `<button class="btn ghost" id="deploy" ${state.deploying ? "disabled" : ""}>${state.deploying ? "Deploying…" : "Deploy preview"}</button>` : ""}
     ${deployHTML()}
     ${session ? `<button class="btn ghost" id="shipped">I'm done</button>` : ""}
-    <button class="btn ghost" id="leave">Leave</button>
-    ${installHTML()}`;
+    <button class="btn ghost" id="leave">Leave</button>`;
   const solutionsPanel = briefs || "<p class='lede'>Nothing on the board yet.</p>";
   return `<div class="screen floor">
     <header>
@@ -1927,8 +1954,6 @@ function bind() {
   if (open) open.onclick = openChat;
   const leave = $("#leave");
   if (leave) leave.onclick = leaveSeat;
-  const installBtn = $("#install");
-  if (installBtn) installBtn.onclick = install;
   const ship = $("#shipped");
   if (ship) ship.onclick = shipped;
   const byoBtn = $("#byo-start");
@@ -1962,6 +1987,13 @@ function bind() {
   if (menuByo) {
     menuByo.onclick = () => {
       state.sheet = "byo";
+      render();
+    };
+  }
+  const menuInstall = $("#menu-install");
+  if (menuInstall) {
+    menuInstall.onclick = () => {
+      state.sheet = "install";
       render();
     };
   }
@@ -2124,6 +2156,9 @@ function bindSheet() {
       render();
     };
   });
+  const installBtn = $("#install");
+  if (installBtn) installBtn.onclick = install;
+  $("#install-later")?.addEventListener("click", closeSheet);
   $("#take-photo")?.addEventListener("click", () => $("#photo")?.click());
   $("#pick-photo")?.addEventListener("click", () => $("#library")?.click());
 }
