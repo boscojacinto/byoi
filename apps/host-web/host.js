@@ -1,12 +1,23 @@
+// FastAPI's own validation errors put a list of {msg, loc} objects in
+// `detail`, not a string — stringify that shape instead of letting it fall
+// through to the default Object/Array toString ("[object Object]").
+function errorDetail(detail, fallback) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map((d) => (d && typeof d === "object" ? d.msg || JSON.stringify(d) : String(d))).join("; ");
+  }
+  return fallback;
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
     // The desk is on the public internet; a session can lapse mid-shift.
     showSignIn();
-    throw new Error(data.detail || "sign in to the desk");
+    throw new Error(errorDetail(data.detail, "sign in to the desk"));
   }
-  if (!res.ok) throw new Error(data.detail || res.statusText);
+  if (!res.ok) throw new Error(errorDetail(data.detail, res.statusText));
   return data;
 }
 
@@ -38,6 +49,26 @@ function escapeHtml(text) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+const PROJECT_KIND_HINTS = {
+  template: "Copies the chosen starter into a new folder on this server.",
+  clone: "Clones a repo you already have on GitHub, by its URL.",
+  github: "Creates a brand-new, empty repo on GitHub — needs gh auth login on this server.",
+  local: "Uses a folder that already exists on this server's disk.",
+};
+
+// Each field is tagged data-kind="template clone …" for the modes it applies
+// to; everything else stays hidden so a field that does nothing for the
+// selected mode (e.g. "GitHub link" while creating a brand-new repo) is
+// never visible to fill in.
+function updateProjectKindFields() {
+  const form = $("newProject");
+  const kind = form.querySelector('input[name="kind"]:checked')?.value || "template";
+  $("projectHint").textContent = PROJECT_KIND_HINTS[kind] || "";
+  form.querySelectorAll("[data-kind]").forEach((el) => {
+    el.hidden = !el.dataset.kind.split(" ").includes(kind);
+  });
 }
 
 function fillTemplateSelect(templates) {
@@ -572,6 +603,11 @@ $("fetchProject").addEventListener("click", async () => {
   }
 });
 
+document.querySelectorAll('#newProject input[name="kind"]').forEach((el) => {
+  el.addEventListener("change", updateProjectKindFields);
+});
+updateProjectKindFields();
+
 $("newProject").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);
@@ -587,13 +623,14 @@ $("newProject").addEventListener("submit", async (ev) => {
         url: fd.get("url"),
         path: fd.get("path"),
         template: fd.get("template"),
-        description: fd.get("description"),
+        description: fd.get("description") || "",
         private: fd.get("private") === "on",
       }),
     });
     msg.textContent = `${created.name} ready.`;
     ev.target.reset();
     ev.target.querySelector('[name="kind"][value="github"]').checked = true;
+    updateProjectKindFields();
     await refresh();
     fillProjectSelect(created.id);
   } catch (err) {

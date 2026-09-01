@@ -124,15 +124,16 @@
         <form id="newProject">
           <p class="row">
             <label><input type="radio" name="kind" value="template" checked /> Template</label>
-            <label><input type="radio" name="kind" value="github" /> GitHub</label>
-            <label><input type="radio" name="kind" value="clone" /> Clone</label>
+            <label><input type="radio" name="kind" value="clone" /> Existing repo</label>
+            <label><input type="radio" name="kind" value="github" /> New repo</label>
             <label><input type="radio" name="kind" value="local" /> Folder</label>
           </p>
-          <input name="name" placeholder="Name" />
-          <select name="template" id="templateSelect"></select>
-          <input name="url" placeholder="GitHub link" />
-          <input name="path" placeholder="Folder on this computer" />
-          <label class="row"><input type="checkbox" name="private" checked /> Private</label>
+          <p class="quiet" id="projectHint"></p>
+          <input name="name" placeholder="Name (optional)" />
+          <select name="template" id="templateSelect" data-kind="template"></select>
+          <input name="url" placeholder="Paste the repo's GitHub URL" data-kind="clone" />
+          <input name="path" placeholder="Folder path on this server" data-kind="local" />
+          <label class="row" data-kind="github"><input type="checkbox" name="private" checked /> Private</label>
           <button type="submit">Save project</button>
           <p id="projectMsg" class="quiet"></p>
         </form>
