@@ -51,6 +51,26 @@ function escapeHtml(text) {
     .replace(/"/g, "&quot;");
 }
 
+const PROJECT_KIND_HINTS = {
+  template: "Copies the chosen starter into a new folder on this server.",
+  clone: "Clones a repo you already have on GitHub, by its URL.",
+  github: "Creates a brand-new, empty repo on GitHub — needs gh auth login on this server.",
+  local: "Uses a folder that already exists on this server's disk.",
+};
+
+// Each field is tagged data-kind="template clone …" for the modes it applies
+// to; everything else stays hidden so a field that does nothing for the
+// selected mode (e.g. "GitHub link" while creating a brand-new repo) is
+// never visible to fill in.
+function updateProjectKindFields() {
+  const form = $("newProject");
+  const kind = form.querySelector('input[name="kind"]:checked')?.value || "template";
+  $("projectHint").textContent = PROJECT_KIND_HINTS[kind] || "";
+  form.querySelectorAll("[data-kind]").forEach((el) => {
+    el.hidden = !el.dataset.kind.split(" ").includes(kind);
+  });
+}
+
 function fillTemplateSelect(templates) {
   const sel = document.querySelector("#templateSelect");
   if (!sel) return;
@@ -583,6 +603,11 @@ $("fetchProject").addEventListener("click", async () => {
   }
 });
 
+document.querySelectorAll('#newProject input[name="kind"]').forEach((el) => {
+  el.addEventListener("change", updateProjectKindFields);
+});
+updateProjectKindFields();
+
 $("newProject").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);
@@ -605,6 +630,7 @@ $("newProject").addEventListener("submit", async (ev) => {
     msg.textContent = `${created.name} ready.`;
     ev.target.reset();
     ev.target.querySelector('[name="kind"][value="github"]').checked = true;
+    updateProjectKindFields();
     await refresh();
     fillProjectSelect(created.id);
   } catch (err) {
