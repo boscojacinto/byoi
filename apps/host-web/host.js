@@ -1,12 +1,23 @@
+// FastAPI's own validation errors put a list of {msg, loc} objects in
+// `detail`, not a string — stringify that shape instead of letting it fall
+// through to the default Object/Array toString ("[object Object]").
+function errorDetail(detail, fallback) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map((d) => (d && typeof d === "object" ? d.msg || JSON.stringify(d) : String(d))).join("; ");
+  }
+  return fallback;
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401) {
     // The desk is on the public internet; a session can lapse mid-shift.
     showSignIn();
-    throw new Error(data.detail || "sign in to the desk");
+    throw new Error(errorDetail(data.detail, "sign in to the desk"));
   }
-  if (!res.ok) throw new Error(data.detail || res.statusText);
+  if (!res.ok) throw new Error(errorDetail(data.detail, res.statusText));
   return data;
 }
 
@@ -587,7 +598,7 @@ $("newProject").addEventListener("submit", async (ev) => {
         url: fd.get("url"),
         path: fd.get("path"),
         template: fd.get("template"),
-        description: fd.get("description"),
+        description: fd.get("description") || "",
         private: fd.get("private") === "on",
       }),
     });
