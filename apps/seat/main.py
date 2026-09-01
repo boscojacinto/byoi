@@ -168,6 +168,33 @@ def _ssh_hint() -> str:
     return f"ssh {GUEST_USER}@{host}"
 
 
+def preview_url() -> str:
+    """Where the guest's phone can open the dev server they are building.
+
+    ``ondemand``: the desk publishes ``p-<session>`` at the edge and passes the
+    address in, because only the desk knows the salon's domain.
+
+    ``static``: nothing is published — the phone is already on the seat's Wi-Fi,
+    so its LAN address is the answer, and working it out here saves the desk
+    from having to guess which interface the phone can see.
+
+    Empty when previews are off, which is how the guest UI knows not to offer
+    a link that would only ever fail.
+    """
+    given = os.environ.get("BYOI_PREVIEW_URL", "").strip()
+    if given:
+        return given
+    if guest_net() == "public":
+        # A container's own address is not somewhere a phone on cellular can
+        # go. Without a route from the desk there is no preview, and saying so
+        # beats handing the guest a link to 172.18.0.4.
+        return ""
+    port = os.environ.get("BYOI_PREVIEW_PORT", "3000").strip()
+    if not port or port == "0":
+        return ""
+    return f"http://{lan_ip()}:{port}"
+
+
 def _via() -> str:
     if TRANSPORT == "rfcomm":
         return "rfcomm"
@@ -211,6 +238,7 @@ def status() -> dict:
         "wifi": guest_net() == "lan",
         "otp_gate": True,
         "guest": "/guest/",
+        "preview": preview_url(),
         "workspace": str(chat_session.workspace_path or default_workspace()),
         "control_port": int(os.environ.get("BYOI_CONTROL_PORT", "8788")),
     }

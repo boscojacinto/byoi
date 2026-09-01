@@ -59,6 +59,7 @@ const state = {
   // keyed "g:"/"t:"/"k:" + id. Absent means "use the default for that row".
   expanded: {},
   sheet: null,
+  preview: "",
   files: null,
   filePath: "",
   images: [],
@@ -479,6 +480,7 @@ function applyChatEvent(msg) {
       detail: msg.detail || "",
       status: msg.status || "running",
       output: msg.output || "",
+      shots: msg.shots,
       diff: msg.diff,
       todos: msg.todos,
       questions: msg.questions,
@@ -836,6 +838,28 @@ function toolInfo(msg) {
     return make("agent", "Ran an agent", "Running an agent", input.description || detail);
   }
   if (name === "Skill") return make("agent", "Ran the skill", "Running the skill", input.skill || detail);
+  // The seat's headless browser (deploy/seat-mcp.json). Left alone these read
+  // as "mcp__browser__browser_take_screenshot", which tells a guest nothing
+  // about the thing they actually asked for — a look at their own page.
+  if (name.startsWith("mcp__browser__")) {
+    const verb = name.slice("mcp__browser__browser_".length);
+    if (verb === "navigate") {
+      // Not hostOf(): this browser is always on localhost, so the host is the
+      // one part of the address that never says which page.
+      const url = String(input.url || detail).replace(/^https?:\/\//, "");
+      return make("web", "Opened", "Opening", url);
+    }
+    if (verb === "take_screenshot") return make("web", "Took a screenshot", "Taking a screenshot", "");
+    if (verb === "snapshot") return make("web", "Read the page", "Reading the page", "");
+    if (verb === "console_messages") return make("web", "Checked the console", "Checking the console", "");
+    if (verb === "network_requests" || verb === "network_request") {
+      return make("web", "Checked the network", "Checking the network", "");
+    }
+    if (verb === "click") return make("web", "Clicked", "Clicking", input.element || detail);
+    if (verb === "type" || verb === "fill_form") return make("web", "Typed into the page", "Typing into the page", input.element || "");
+    if (verb === "resize") return make("web", "Resized the window", "Resizing the window", "");
+    return make("web", "Used the browser", "Using the browser", verb.replace(/_/g, " "));
+  }
   return make("tool", name, name, detail);
 }
 
@@ -1042,20 +1066,42 @@ function outputHTML(msg) {
   return `<pre class="term">${marked}</pre>`;
 }
 
+const B64 = /^[A-Za-z0-9+/=]*$/;
+const SHOT_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+// What the seat's browser saw. The seat has already re-encoded these to
+// something phone-sized; this only has to refuse anything that is not the
+// base64 it claims to be, since it goes straight into a data: URL.
+function shotsHTML(msg) {
+  const shots = Array.isArray(msg.shots) ? msg.shots : [];
+  const good = shots.filter((s) => s && typeof s.data === "string" && B64.test(s.data));
+  if (!good.length) return "";
+  return `<div class="shots">${good
+    .map((s) => {
+      const type = SHOT_TYPES.has(s.media_type) ? s.media_type : "image/jpeg";
+      return `<img alt="What the page looked like" loading="lazy" src="data:${type};base64,${s.data}">`;
+    })
+    .join("")}</div>`;
+}
+
 function toolBodyHTML(msg) {
+  const shots = shotsHTML(msg);
   const diff = diffHTML(msg);
   const out = outputHTML(msg);
-  if (!diff && !out) {
+  if (!shots && !diff && !out) {
     return msg.status === "running" ? "" : `<div class="tool-empty">No output.</div>`;
   }
-  return `${diff}${out}`;
+  return `${shots}${diff}${out}`;
 }
 
 function toolRowHTML(msg) {
   const info = toolInfo(msg);
   const running = msg.status === "running";
   const failed = msg.status === "error";
-  const open = state.expanded[`t:${msg.id}`] ?? failed;
+  // A screenshot behind a collapsed card is a screenshot nobody looks at, and
+  // looking is the entire reason the call was made.
+  const shot = Array.isArray(msg.shots) && msg.shots.length > 0;
+  const open = state.expanded[`t:${msg.id}`] ?? (failed || shot);
   const diff = diffOf(msg);
   const mark = running
     ? `<span class="spin"></span>`
@@ -1351,6 +1397,7 @@ function floorHTML() {
         }
         ${state.status ? `<p class="status">${escapeHtml(state.status)}</p>` : ""}
         <button class="btn" id="open-chat" ${state.busy || !session ? "disabled" : ""}>${state.busy ? "Opening…" : "Chat"}</button>
+        ${previewHTML(session)}
         ${session && claimed && claimed.project ? `<button class="btn ghost" id="deploy" ${state.deploying ? "disabled" : ""}>${state.deploying ? "Deploying…" : "Deploy preview"}</button>` : ""}
         ${deployHTML()}
         ${session ? `<button class="btn ghost" id="shipped">I'm done</button>` : ""}
@@ -1484,6 +1531,14 @@ async function byoCancel() {
   state.byoEmail = "";
   state.byoBusy = false;
   render();
+}
+
+// The dev server the seat is running right now, as opposed to deployHTML()'s
+// deployed copy. Nothing here knows whether it is up — the guest starts and
+// stops it all visit — so this is a link, not a claim.
+function previewHTML(session) {
+  if (!session || !state.preview) return "";
+  return `<p class="status">your app · <a href="${escapeHtml(state.preview)}" target="_blank" rel="noreferrer noopener">${escapeHtml(state.preview)}</a></p>`;
 }
 
 function deployHTML() {
@@ -1970,6 +2025,9 @@ async function seatNetwork() {
     if (!res.ok) return;
     const status = await res.json();
     state.onWifi = status.guest_net !== "public";
+    // Where this phone can open the dev server the seat is running. Empty when
+    // previews are off, and then no link is offered at all.
+    state.preview = String(status.preview || "");
     if (state.onWifi && state.status.startsWith("Open the slip")) {
       state.status = "Same Wi-Fi as the seat PC. " + state.status;
     }

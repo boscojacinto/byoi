@@ -49,6 +49,10 @@ services:
       BYOI_CADDY_ADMIN: /run/caddyadmin/admin.sock
       BYOI_EDGE_NETWORK: byoi-edge
       BYOI_CONTROL_NETWORK: byoi-ctl
+      # The guest's dev server, published at p-<session>.<domain> so their own
+      # phone can open it. Nothing gates it — set this empty to publish no such
+      # route at all.
+      BYOI_PREVIEW_PORT: ${BYOI_PREVIEW_PORT-3000}
     env_file:
       # Deploy credentials (Vercel, Neon, Upstash). Desk only — the seat
       # containers are built without them and never receive this file.

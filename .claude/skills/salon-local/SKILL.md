@@ -30,6 +30,7 @@ has credentials in it.
 | 8786 | seat, plain HTTP | this PC's browser (no CA needed) |
 | 8787 | seat, guest HTTPS | the phone, over Wi-Fi |
 | 8788 | seat control, mTLS | the desk only |
+| 3000 | the guest's dev server | their Claude's browser, and their phone |
 
 ## First time on this PC
 
@@ -39,6 +40,19 @@ pip install -e ".[salon,dev]"
 ./scripts/salon-tls.sh                 # salon CA, mTLS certs, host token
 ./scripts/salon-secrets.sh operator    # desk sign-in password
 ```
+
+The headless browser a guest's Claude uses to look at the page it is building
+(`deploy/seat-mcp.json`). Optional — without it a seat still opens, the guest
+just loses the page snapshot — but a brief with a screen is most of them:
+
+```bash
+npm install -g @playwright/mcp@0.0.80
+playwright-mcp install-browser chromium --with-deps
+```
+
+Install the browser with that package's own CLI, not a separately installed
+`playwright`: browser builds are pinned per Playwright version, and a mismatch
+fails at the first navigate rather than here.
 
 Then the Claude accounts. **Two at minimum** — with one, a usage limit ends the
 visit instead of moving it to a spare chair:

@@ -256,6 +256,88 @@ following a brief doesn't hit that wall. Override it with `BYOI_CLAUDE_TOOLS`
 — set to `--allowedTools`'s own syntax to replace the list, or to `""` for a
 deliberately tighter guest sandbox with no default allowlist at all.
 
+## Looking at the page
+
+Most briefs end in something with a screen, and until a guest can see it they
+are taking Claude's word for how their own work looks. Three things make that
+possible, and none of them goes through Bash.
+
+### The seat's browser
+
+`deploy/seat-mcp.json` declares a headless Chromium as an **MCP server**, and
+`claude_chat.seat_mcp_config()` passes it to `--mcp-config`. MCP is the whole
+point: a browser driven from Bash would be denied by the safety classifier
+above, before any card could reach the phone. MCP tools take the ordinary
+permission path instead — the one the seat already turns into Allow / Deny —
+and `mcp__browser` is on the default allowlist so a dozen navigate-and-look
+calls do not become a dozen taps.
+
+Claude gets `browser_navigate`, `browser_snapshot` (the accessibility tree,
+which is cheaper and more useful than pixels for anything it intends to click),
+`browser_take_screenshot`, `browser_console_messages` and
+`browser_network_requests`. It reaches the guest's dev server at
+`127.0.0.1:3000`, inside the seat.
+
+`--strict-mcp-config` goes with it. A guest repo carrying its own `.mcp.json`
+must not be able to add servers to the sandbox it is being edited in.
+
+Two things worth knowing:
+
+* **The browser does not narrow the seat's reach, and does not widen it
+  either.** `Bash(npm run *)` is already arbitrary code with network access —
+  that is why the Docker socket and the Vercel token live on the desk and not
+  here. Playwright's `--allowed-origins` is left off by default because its own
+  authors decline to call it a security boundary, and switching it on breaks
+  every page that loads a font or a script from a CDN. An operator who wants it
+  anyway adds it to `deploy/seat-mcp.json`.
+* **Screenshots cost tokens**, and a seat runs on a pooled account that fails
+  over on quota. `browser_snapshot` is the cheap one; pixels are for questions
+  that are actually about pixels.
+
+The image is baked with a pinned `@playwright/mcp` and installs chromium with
+that same package's own CLI, because browser builds are pinned per Playwright
+version. On a salon PC, install it next to Claude Code:
+
+```bash
+npm install -g @playwright/mcp@0.0.80
+playwright-mcp install-browser chromium --with-deps
+```
+
+A seat with no browser installed still opens — `seat_mcp_config()` treats a
+missing file as "no MCP servers", and a server that will not start costs the
+guest a page snapshot, not a seat.
+
+### The guest's own browser
+
+The phone is the second browser, and the only one that can answer "does this
+feel right on a phone". `p-<session>.<domain>` is published beside
+`s-<session>` at check-in and torn down with it, pointed at port 3000 in that
+seat's container. In `static` the route is unnecessary — the phone is already
+on the seat's Wi-Fi, so the seat offers its own LAN address instead. Either
+way the address turns up in the guest UI under **This session**.
+
+**What this publishes is public.** The seat next door has an OTP in front of
+it; a dev server does not, and could not be given one without the salon
+reaching inside the guest's app. The hostname is unlisted and dies at checkout
+— the same bargain this document already strikes for a Vercel preview.
+`BYOI_PREVIEW_PORT=` (empty) switches it off.
+
+The dev server has to listen on all interfaces or nothing reaches it, which is
+why the template's `dev` script is `next dev -H 0.0.0.0`.
+
+### Screenshots on the phone
+
+A tool result carrying an image used to be collapsed to `[image]`: reading a
+photo out of a repo produced hundreds of kilobytes of base64 that said nothing
+on a phone. Screenshots come back the same way, so the seat now re-encodes them
+to something phone-sized and sends them as `shots` on the tool card, and the
+guest app renders them inline with the card already open.
+
+The pixels are kept on the last few only. The whole history is re-sent in the
+snapshot on every reconnect, and a phone in a cafe reconnects a lot; older
+cards go back to naming the image the way they did before there was anywhere
+to show it.
+
 ## Run
 
 ### On a salon PC (`static`)
@@ -700,6 +782,8 @@ behaviour, so an existing checkout keeps working untouched.
 | `BYOI_PRINT_MODE` | `local` | `relay` queues slips for the venue's printer agent |
 | `BYOI_OPERATOR_TTL` / `BYOI_OPERATOR_IDLE` | `43200` / `7200` | Desk session lifetime, in seconds |
 | `BYOI_COOKIE_SECURE` | `1` | `0` only where the desk is served over plain HTTP |
+| `BYOI_PREVIEW_PORT` | `3000` | Dev-server port published at `p-<session>.<domain>`. Empty turns previews off |
+| `BYOI_SEAT_MCP` | `deploy/seat-mcp.json` | MCP servers the seat's Claude gets. Empty means none |
 
 ## What did not change
 

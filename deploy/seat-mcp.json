@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "browser": {
+      "command": "playwright-mcp",
+      "args": [
+        "--browser", "chromium",
+        "--headless",
+        "--no-sandbox",
+        "--isolated",
+        "--output-dir", "/tmp/byoi-browser"
+      ]
+    }
+  }
+}

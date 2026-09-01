@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import json
 import sys
 from pathlib import Path
@@ -593,6 +595,76 @@ def test_an_operator_can_explicitly_disable_the_default(monkeypatch):
     assert "--allowedTools" not in argv
 
 
+# --- the seat's own MCP servers (the headless browser) ----------------------
+
+
+def test_the_browser_is_reached_over_mcp_not_bash(monkeypatch):
+    """Bash could never carry it.
+
+    Claude Code's Bash safety classifier denies off-allowlist commands before
+    emitting a control request, so a browser driven from Bash has no card the
+    guest could ever approve. MCP tools take the ordinary permission path.
+    """
+    monkeypatch.delenv("BYOI_SEAT_MCP", raising=False)
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: True)
+    argv = claude_chat.claude_argv()
+
+    config = Path(argv[argv.index("--mcp-config") + 1])
+    assert config.is_file()
+    assert "browser" in json.loads(config.read_text())["mcpServers"]
+    assert "mcp__browser" in claude_chat.DEFAULT_ALLOWED_TOOLS
+
+
+def test_a_guest_repos_own_mcp_json_cannot_add_tools(monkeypatch):
+    """The guest is editing this tree. A .mcp.json they commit must not become
+    a way to load servers into the seat's Claude."""
+    monkeypatch.delenv("BYOI_SEAT_MCP", raising=False)
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: True)
+    assert "--strict-mcp-config" in claude_chat.claude_argv()
+
+
+def test_a_salon_pc_without_the_browser_still_opens(monkeypatch, tmp_path):
+    """A missing config is not an error -- the guest loses the page snapshot,
+    not the seat. Passing --mcp-config a path that is not there is."""
+    monkeypatch.setenv("BYOI_SEAT_MCP", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: True)
+    assert "--mcp-config" not in claude_chat.claude_argv()
+
+
+def test_an_operator_can_run_a_seat_with_no_mcp_servers(monkeypatch):
+    """Empty is a deliberate choice, the way it is for BYOI_CLAUDE_TOOLS."""
+    monkeypatch.setenv("BYOI_SEAT_MCP", "")
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: True)
+    assert "--mcp-config" not in claude_chat.claude_argv()
+
+
+def test_a_build_without_mcp_config_degrades(monkeypatch):
+    """`unknown option` is fatal before stdin is read, same as any other flag."""
+    monkeypatch.delenv("BYOI_SEAT_MCP", raising=False)
+    monkeypatch.setattr(claude_chat, "supports_flag", lambda b, f: False)
+    argv = claude_chat.claude_argv()
+
+    assert "--mcp-config" not in argv
+    assert "--strict-mcp-config" not in argv
+
+
+def test_the_shipped_browser_can_actually_launch_in_a_seat():
+    """Two things the seat container makes non-negotiable.
+
+    The container runs as root, where chromium's own sandbox refuses to start,
+    and there is no display. Both are silent failures at the first navigate.
+    """
+    config = json.loads((claude_chat.ROOT / "deploy" / "seat-mcp.json").read_text())
+    args = config["mcpServers"]["browser"]["args"]
+
+    assert "--headless" in args
+    assert "--no-sandbox" in args
+    # Screenshots are files. verify.py already learned that a grader writing
+    # into the guest's tree leaves things in a repo the guest keeps.
+    out = args[args.index("--output-dir") + 1]
+    assert not out.startswith(str(claude_chat.ROOT))
+
+
 def test_support_is_probed_from_the_binarys_own_help(monkeypatch):
     claude_chat._help_text.cache_clear()
     seen = []
@@ -633,6 +705,161 @@ def test_an_image_result_is_named_not_dumped():
     assert "AAAA" not in claude_chat._result_text([image])
     # Text still wins whenever there is any.
     assert claude_chat._result_text([{"type": "text", "text": "ok"}, image]) == "ok"
+
+
+# --- what the browser saw, on the guest's phone -----------------------------
+
+
+def _png(width: int = 1200, height: int = 900, *, flat: bool = False) -> str:
+    """A screenshot-shaped PNG. Noisy by default: a page of flat colour is a
+    pathological case for JPEG, and it is the case the shrink path must not
+    make worse."""
+    import random
+
+    from PIL import Image
+
+    if flat:
+        image = Image.new("RGB", (width, height), (200, 40, 40))
+    else:
+        rand = random.Random(0)
+        image = Image.frombytes("RGB", (width, height), rand.randbytes(width * height * 3))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _shot_result(data: str, media_type: str = "image/png") -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def test_the_shape_the_browser_actually_returns_is_understood():
+    """MCP does not use Anthropic's image block.
+
+    `browser_take_screenshot` returns a flat block with `mimeType`, not a
+    `source` wrapper with `media_type`, and it ships a text block beside it.
+    Measured against @playwright/mcp 0.0.80 inside the seat image. Reading only
+    Anthropic's shape sent the pixels nowhere and nothing said so.
+    """
+    translator = GuestTranslator()
+    translator._tools["t1"] = {"name": "mcp__browser__browser_take_screenshot", "input": {}}
+    (event,) = translator.feed(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [
+                            {"type": "text", "text": "### Result\n- Screenshot of viewport"},
+                            {"type": "image", "data": _png(400, 300), "mimeType": "image/png"},
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert event["shots"], "the browser's own block shape was not recognised"
+    # The text beside it says what was captured, so it is kept.
+    assert "Screenshot of viewport" in event["output"]
+
+
+def test_a_screenshot_reaches_the_phone_instead_of_being_named():
+    """Claude seeing the page is half of it. A guest taking Claude's word for
+    how their own work looks is the half that was missing."""
+    translator = GuestTranslator()
+    translator._tools["t1"] = {"name": "mcp__browser__browser_take_screenshot", "input": {}}
+    (event,) = translator.feed(_shot_result(_png()))
+
+    assert event["shots"], "the picture never made it out of the tool result"
+    assert event["shots"][0]["media_type"] == "image/jpeg"
+    # The old placeholder described what there was nowhere to show. There is now.
+    assert event["output"] == ""
+
+
+def test_a_screenshot_is_shrunk_to_something_a_phone_will_load():
+    """Chromium hands back a full-resolution PNG, and every one of them is
+    re-sent in the snapshot on every reconnect."""
+    from PIL import Image
+
+    raw = _png(1200, 900)
+    translator = GuestTranslator()
+    (event,) = translator.feed(_shot_result(raw))
+
+    packed = event["shots"][0]["data"]
+    assert len(packed) < len(raw) / 4
+    image = Image.open(io.BytesIO(base64.b64decode(packed)))
+    assert max(image.size) <= claude_chat.SHOT_MAX_EDGE
+
+
+def test_a_small_screenshot_is_not_made_bigger():
+    """JPEG loses to PNG on a page of flat colour. Nothing needed scaling here,
+    so re-encoding would spend bytes to make the picture worse."""
+    raw = _png(400, 300, flat=True)
+    translator = GuestTranslator()
+    (event,) = translator.feed(_shot_result(raw))
+
+    assert event["shots"][0]["media_type"] == "image/png"
+    assert event["shots"][0]["data"] == raw
+
+
+def test_something_that_is_not_an_image_is_not_forwarded():
+    translator = GuestTranslator()
+    (event,) = translator.feed(_shot_result(base64.b64encode(b"not a png").decode()))
+
+    assert not event.get("shots")
+    # And the tool card still says what came back, the way it always did.
+    assert event["output"] == "[image]"
+
+
+def test_a_read_of_a_photo_still_shows_its_text():
+    """Text wins whenever there is any -- a tool that returns both is not a
+    screenshot, and blanking its output would lose the part that was readable."""
+    translator = GuestTranslator()
+    obj = _shot_result(_png(40, 40))
+    obj["message"]["content"][0]["content"].insert(0, {"type": "text", "text": "read 1 image"})
+    (event,) = translator.feed(obj)
+
+    assert event["output"] == "read 1 image"
+    assert event["shots"]
+
+
+def test_only_the_last_few_screenshots_keep_their_pixels(tmp_path, monkeypatch):
+    """A phone in a cafe reconnects a lot, and every reconnect re-sends the
+    whole history."""
+    chat = claude_chat.ClaudeChat()
+    for i in range(claude_chat.SHOT_HISTORY + 3):
+        chat._remember(
+            {
+                "type": "tool",
+                "id": f"t{i}",
+                "name": "mcp__browser__browser_take_screenshot",
+                "status": "done",
+                "output": "",
+                "shots": [{"media_type": "image/jpeg", "data": "AAAA"}],
+            }
+        )
+
+    kept = [h for h in chat._history if h.get("shots")]
+    assert len(kept) == claude_chat.SHOT_HISTORY
+    # The newest are the ones worth carrying.
+    assert kept[-1]["id"] == f"t{claude_chat.SHOT_HISTORY + 2}"
+    # An older card is still a card -- it goes back to naming what it returned.
+    assert chat._history[0]["output"] == "[image]"
 
 
 def test_the_reader_takes_a_line_carrying_an_image(monkeypatch):

@@ -392,6 +392,25 @@ input[type="text"], input[type="url"] {
 }
 .tool-body { border-top: 1px solid var(--rule); }
 .tool-empty { padding: 0.55rem 0.7rem; color: var(--muted); font-size: 0.8rem; }
+/* What the seat's browser saw. Dark behind it, like the terminal output it
+   sits next to, so a page with a white background still reads as a picture of
+   a page rather than as a hole in the card. */
+.shots {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  background: #1b1612;
+}
+.shots img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 60vh;
+  object-fit: contain;
+  object-position: top;
+  border-radius: 2px;
+}
 .group-collapse {
   display: block;
   width: 100%;

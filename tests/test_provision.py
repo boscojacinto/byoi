@@ -225,6 +225,64 @@ def test_with_no_edge_configured_publish_is_a_no_op(monkeypatch):
     assert caddy.unpublish("abc123") is False
 
 
+# --- the guest's own dev server, on the guest's own phone --------------------
+
+
+def test_the_preview_route_reaches_the_dev_server(caddy_admin):
+    """On cellular the phone only ever reaches the edge, so a dev server the
+    seat is running is unopenable by the person who asked for it."""
+    caddy.publish_preview("abc123", "byoi-seat-abc123")
+    route = caddy_admin["routes"][0]
+
+    assert route["@id"] == "byoi-preview-abc123"
+    assert route["match"] == [{"host": ["p-abc123.salon.example"]}]
+    dial = route["handle"][0]["routes"][0]["handle"][0]["upstreams"]
+    assert dial == [{"dial": "byoi-seat-abc123:3000"}]
+
+
+def test_the_seat_route_is_not_disturbed_by_the_preview(caddy_admin):
+    """Publishing one used to delete every route for the session first."""
+    caddy.publish("abc123", "byoi-seat-abc123:8787")
+    caddy.publish_preview("abc123", "byoi-seat-abc123")
+    ids = {r.get("@id") for r in caddy_admin["routes"]}
+
+    assert ids == {"byoi-seat-abc123", "byoi-preview-abc123"}
+
+
+def test_freeing_a_seat_takes_the_preview_route_with_it(caddy_admin):
+    """A preview route left behind is a public hostname pointed at a container
+    name the next visit could be handed."""
+    caddy.publish("abc123", "byoi-seat-abc123:8787")
+    caddy.publish_preview("abc123", "byoi-seat-abc123")
+    caddy.unpublish("abc123")
+
+    assert caddy_admin["routes"] == []
+
+
+def test_an_operator_can_switch_previews_off(caddy_admin, monkeypatch):
+    """What it publishes has no OTP in front of it, so there is a switch."""
+    monkeypatch.setenv("BYOI_PREVIEW_PORT", "")
+    assert caddy.publish_preview("abc123", "byoi-seat-abc123") is None
+    assert caddy_admin["routes"] == []
+
+
+def test_the_seat_is_told_the_address_before_it_starts(monkeypatch, tmp_path):
+    """The route is published after `docker run`, so the URL has to be derived
+    rather than looked up — the container needs it at boot."""
+    monkeypatch.setenv("BYOI_DOMAIN", "salon.example")
+    monkeypatch.setenv("BYOI_SEAT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    args = seats._run_args(
+        "abc123", tls_dir=tmp_path, labels=[], seat={"id": "seat-1", "name": "Seat 1"}
+    )
+    assert "BYOI_PREVIEW_URL=https://p-abc123.salon.example" in args
+
+    monkeypatch.setenv("BYOI_PREVIEW_PORT", "0")
+    args = seats._run_args(
+        "abc123", tls_dir=tmp_path, labels=[], seat={"id": "seat-1", "name": "Seat 1"}
+    )
+    assert not [a for a in args if a.startswith("BYOI_PREVIEW_URL")]
+
+
 # --- provision and teardown --------------------------------------------------
 
 
@@ -254,6 +312,26 @@ def test_provision_records_the_container_and_hostname(
     from apps.api.seat_sync import control_base
 
     assert control_base(after) == f"https://byoi-seat-{sess['id']}:8788"
+    assert out["preview_host"] == f"p-{sess['id']}.salon.example"
+
+
+def test_an_edge_that_refuses_the_preview_still_seats_the_guest(
+    tmp_path, fake_docker, caddy_admin, ready_seat, monkeypatch
+):
+    """A guest is standing at the desk. The seat route is the visit; a second
+    route the edge would not take is not worth turning them away over."""
+
+    def refuse(*_args, **_kw):
+        raise caddy.CaddyError("edge said no")
+
+    monkeypatch.setattr(caddy, "publish_preview", refuse)
+    store = Store(tmp_path / "salon.db")
+    sess = store.check_in("seat-1", "Ada")
+    out = seats.provision(store, sess, store.seat("seat-1"))
+
+    assert out["public_host"] == f"s-{sess['id']}.salon.example"
+    assert out["preview_host"] is None
+    assert store.seat("seat-1")["state"] == "ready"
 
 
 def test_provision_attaches_the_control_network(tmp_path, fake_docker, caddy_admin, ready_seat):

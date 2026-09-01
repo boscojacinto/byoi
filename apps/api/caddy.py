@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 ROUTE_ID_PREFIX = "byoi-seat-"
+PREVIEW_ROUTE_ID_PREFIX = "byoi-preview-"
 TIMEOUT = 10.0
 
 
@@ -47,6 +48,39 @@ def seat_hostname(session_id: str) -> str:
 
 def route_id(session_id: str) -> str:
     return f"{ROUTE_ID_PREFIX}{session_id}"
+
+
+def preview_hostname(session_id: str) -> str:
+    """Where the guest's own phone reaches the dev server they are building.
+
+    A seat's Claude can look at ``127.0.0.1:3000`` from inside the container,
+    but the guest cannot: on cellular their phone only ever reaches the edge.
+    One more route per visit is what turns "does it look right?" into something
+    the person who asked can answer for themselves.
+    """
+    base = domain()
+    return f"p-{session_id}.{base}" if base else f"p-{session_id}"
+
+
+def preview_route_id(session_id: str) -> str:
+    return f"{PREVIEW_ROUTE_ID_PREFIX}{session_id}"
+
+
+def preview_port() -> int | None:
+    """The dev server port to publish, or None when the operator wants none.
+
+    3000 is not a guess: it is the port ``infra.py`` already writes into
+    ``AUTH_URL`` for every templated project. Empty or 0 turns the route off --
+    unlike the seat, what it exposes has no OTP in front of it.
+    """
+    raw = os.environ.get("BYOI_PREVIEW_PORT", "3000").strip()
+    if not raw:
+        return None
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if port > 0 else None
 
 
 def _client() -> httpx.Client:
@@ -84,10 +118,10 @@ def https_server(client: httpx.Client) -> str:
     raise CaddyError("no Caddy server is listening on :443")
 
 
-def route_for(session_id: str, upstream: str) -> dict[str, Any]:
+def _route(rid: str, hostname: str, upstream: str) -> dict[str, Any]:
     return {
-        "@id": route_id(session_id),
-        "match": [{"host": [seat_hostname(session_id)]}],
+        "@id": rid,
+        "match": [{"host": [hostname]}],
         "handle": [
             {
                 "handler": "subroute",
@@ -107,40 +141,87 @@ def route_for(session_id: str, upstream: str) -> dict[str, Any]:
     }
 
 
-def publish(session_id: str, upstream: str) -> str:
-    """Route this session's hostname at its seat container. Returns the hostname.
+def route_for(session_id: str, upstream: str) -> dict[str, Any]:
+    return _route(route_id(session_id), seat_hostname(session_id), upstream)
 
-    The route is inserted at index 0, ahead of the wildcard site's catch-all. A
-    route appended after it would never be reached: ``*.domain`` matches the
+
+def preview_route_for(session_id: str, upstream: str) -> dict[str, Any]:
+    return _route(preview_route_id(session_id), preview_hostname(session_id), upstream)
+
+
+def _insert(client: httpx.Client, route: dict[str, Any], what: str) -> None:
+    """Put one route at index 0, ahead of the wildcard site's catch-all.
+
+    A route appended after it would never be reached: ``*.domain`` matches the
     session hostname too, and answers 404.
     """
+    server = https_server(client)
+    _delete(client, str(route["@id"]), what)
+    res = client.put(
+        f"/config/apps/http/servers/{server}/routes/0",
+        content=json.dumps(route),
+        headers={"Content-Type": "application/json"},
+    )
+    _raise_for(res, what)
+
+
+def _delete(client: httpx.Client, rid: str, what: str) -> bool:
+    res = client.delete(f"/id/{rid}")
+    if res.status_code == 404 or (res.status_code >= 400 and "unknown object" in res.text):
+        return False
+    _raise_for(res, what)
+    return True
+
+
+def publish(session_id: str, upstream: str) -> str:
+    """Route this session's hostname at its seat container. Returns the hostname."""
     host = seat_hostname(session_id)
     if not enabled():
         return host
     with _client() as client:
-        server = https_server(client)
-        unpublish(session_id, client=client)
-        res = client.put(
-            f"/config/apps/http/servers/{server}/routes/0",
-            content=json.dumps(route_for(session_id, upstream)),
-            headers={"Content-Type": "application/json"},
-        )
-        _raise_for(res, f"publishing {host}")
+        _insert(client, route_for(session_id, upstream), f"publishing {host}")
+    return host
+
+
+def publish_preview(session_id: str, container: str) -> str | None:
+    """Route ``p-<session>`` at the dev server inside that seat.
+
+    Returns the hostname, or None when previews are switched off. Nothing here
+    checks that anything is listening: the guest starts and stops their own dev
+    server all visit, and a 502 between runs is the honest answer.
+
+    **What this publishes is public.** The seat next door has an OTP in front of
+    it; a dev server does not, and cannot be given one without the salon sitting
+    inside the guest's own app. The hostname is unlisted and dies at checkout --
+    the same bargain ``docs/salon.md`` already strikes for a Vercel preview.
+    """
+    port = preview_port()
+    if port is None:
+        return None
+    host = preview_hostname(session_id)
+    if not enabled():
+        return host
+    with _client() as client:
+        _insert(client, preview_route_for(session_id, f"{container}:{port}"), f"publishing {host}")
     return host
 
 
 def unpublish(session_id: str, *, client: httpx.Client | None = None) -> bool:
-    """Remove the route. True if one was there; a missing route is not an error."""
+    """Remove this session's routes. True if either was there; missing is not
+    an error.
+
+    Both go together. A preview route left behind is a public hostname pointed
+    at a container name the next visit could be given.
+    """
     if not enabled():
         return False
     owned = client is None
     client = client or _client()
     try:
-        res = client.delete(f"/id/{route_id(session_id)}")
-        if res.status_code == 404 or (res.status_code >= 400 and "unknown object" in res.text):
-            return False
-        _raise_for(res, f"removing the route for session {session_id}")
-        return True
+        what = f"removing the routes for session {session_id}"
+        seat = _delete(client, route_id(session_id), what)
+        preview = _delete(client, preview_route_id(session_id), what)
+        return seat or preview
     finally:
         if owned:
             client.close()

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import io
 import json
 import os
 import shutil
@@ -129,6 +132,12 @@ OPTIONAL_FLAGS = (
 # wall on an ordinary "npm run lint". Deliberately narrow: run/test/install
 # invocations, not anything that could touch the network or the filesystem
 # outside the project (no curl, no rm, no sudo).
+#
+# `mcp__browser` is the headless browser (deploy/seat-mcp.json). It is
+# pre-approved rather than left to prompt because looking at a page is a dozen
+# navigate/snapshot/click calls, and a card per call on a phone is worse than
+# useless -- the guest taps Allow twelve times or gives up. The tools it covers
+# are confined to a browser the seat owns and throws away.
 DEFAULT_ALLOWED_TOOLS = (
     "Bash(npm run *) Bash(npm test) Bash(npm install) Bash(npm ci) "
     "Bash(yarn *) Bash(pnpm *) Bash(bun run *) Bash(bun install) Bash(bun test) "
@@ -136,8 +145,30 @@ DEFAULT_ALLOWED_TOOLS = (
     "Bash(git commit *) Bash(git branch *) Bash(git show *) "
     "Bash(pytest *) Bash(python -m pytest *) Bash(python3 -m pytest *) "
     "Bash(pip install *) Bash(pip3 install *) "
-    "Bash(make *) Bash(cargo build *) Bash(cargo test *) Bash(go build *) Bash(go test *)"
+    "Bash(make *) Bash(cargo build *) Bash(cargo test *) Bash(go build *) Bash(go test *) "
+    "mcp__browser"
 )
+
+
+def seat_mcp_config() -> Path | None:
+    """The seat's own MCP servers, or None to start Claude without any.
+
+    Unset: the file shipped in the repo, which is also where the seat image
+    copies it. Explicitly empty: an operator who wants no MCP servers at all --
+    the same "unset vs. empty" distinction ``BYOI_CLAUDE_TOOLS`` already makes.
+
+    A path that is not there is not an error. A salon PC that never installed
+    the browser should still open for business; the guest loses the page
+    snapshot, not the seat.
+    """
+    raw = os.environ.get("BYOI_SEAT_MCP")
+    if raw is None:
+        path = ROOT / "deploy" / "seat-mcp.json"
+    elif not raw.strip():
+        return None
+    else:
+        path = Path(raw).expanduser()
+    return path if path.is_file() else None
 
 
 @lru_cache(maxsize=4)
@@ -182,6 +213,15 @@ def claude_argv() -> list[str]:
         tools = DEFAULT_ALLOWED_TOOLS
     if tools.strip():
         argv.extend(["--allowedTools", tools])
+    mcp = seat_mcp_config()
+    if mcp is not None and supports_flag(binary, "--mcp-config"):
+        argv.extend(["--mcp-config", str(mcp)])
+        # The guest is editing this tree. A repo that carries its own .mcp.json
+        # would otherwise have its servers loaded into the seat's Claude, which
+        # turns a file the guest controls into a way to add tools to the
+        # sandbox. Strict mode keeps the seat to the servers the salon declared.
+        if supports_flag(binary, "--strict-mcp-config"):
+            argv.append("--strict-mcp-config")
     extra = os.environ.get("BYOI_CLAUDE_EXTRA", "").strip()
     if extra:
         argv.extend(extra.split())
@@ -295,6 +335,97 @@ def _text_of(blocks: list[dict[str, Any]]) -> str:
 def _thinking_of(blocks: list[dict[str, Any]]) -> str:
     parts = [str(block.get("thinking") or block.get("text") or "") for block in blocks if block.get("type") == "thinking"]
     return "".join(parts)
+
+
+# A screenshot is worth a paragraph of "the header is still too tall", but only
+# if it arrives. Chromium hands back a full-resolution PNG -- a 1280x800 page is
+# about a megabyte, half as much again once base64'd -- and the whole history is
+# re-sent in the snapshot every time a phone on cellular reconnects. Re-encoding
+# to something phone-sized, and keeping the pixels only on the last few, is what
+# stops a visit's worth of screenshots from becoming the slow part of the visit.
+SHOT_MAX_EDGE = 900
+SHOT_QUALITY = 72
+SHOT_MAX_PER_RESULT = 2
+SHOT_HISTORY = 4
+# Only when Pillow could not re-encode it. Bigger than this and the picture is
+# worth less than the reconnect it would cost.
+SHOT_RAW_MAX = 400_000
+SHOT_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
+def _shrink(data: str, media_type: str) -> dict[str, str] | None:
+    """One image block, re-encoded small enough to send to a phone."""
+    if not data:
+        return None
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        # A salon PC that somehow has no Pillow. Forward a small one as it came
+        # and drop a large one -- this is the only branch where "could not
+        # re-encode it" still means "it is probably an image", because nothing
+        # here has looked at the bytes.
+        if len(data) <= SHOT_RAW_MAX and media_type in SHOT_TYPES:
+            return {"media_type": media_type, "data": data}
+        return None
+    try:
+        image = Image.open(io.BytesIO(raw))
+        fits = max(image.size) <= SHOT_MAX_EDGE
+        image.thumbnail((SHOT_MAX_EDGE, SHOT_MAX_EDGE))
+        buf = io.BytesIO()
+        image.convert("RGB").save(buf, format="JPEG", quality=SHOT_QUALITY)
+        shrunk = buf.getvalue()
+    except Exception:  # noqa: BLE001 -- never lose a turn over a screenshot
+        # Pillow is here and could not read it, so it was not an image. Passing
+        # the bytes on would put whatever this is into an <img> on the phone.
+        return None
+    if fits and len(raw) <= len(shrunk) and media_type in SHOT_TYPES:
+        # A page of flat colour is smaller as the PNG it arrived as. Nothing had
+        # to be scaled down, so the smaller of the two is simply the better one.
+        return {"media_type": media_type, "data": data}
+    return {
+        "media_type": "image/jpeg",
+        "data": base64.b64encode(shrunk).decode("ascii"),
+    }
+
+
+def _shots(content: Any) -> list[dict[str, str]]:
+    """The images in a tool result, ready for the guest's phone.
+
+    The browser is the reason this exists: a page snapshot the guest cannot see
+    leaves them taking Claude's word for how their own work looks.
+    """
+    if not isinstance(content, list):
+        return []
+    out: list[dict[str, str]] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "image":
+            continue
+        source = block.get("source")
+        if isinstance(source, dict):
+            # Anthropic's shape -- a Read of a photo out of the guest's repo.
+            if source.get("type") != "base64":
+                continue
+            data = str(source.get("data") or "")
+            media = str(source.get("media_type") or "")
+        else:
+            # MCP's own shape, which is what the browser actually returns:
+            # flat, and `mimeType` rather than `media_type`. Measured against
+            # @playwright/mcp 0.0.80's browser_take_screenshot inside the seat
+            # image. Both are accepted because which one reaches the stream
+            # depends on how the CLI relays an MCP result, and a screenshot
+            # silently becoming "[image]" again is not a failure anyone sees.
+            data = str(block.get("data") or "")
+            media = str(block.get("mimeType") or block.get("media_type") or "")
+        packed = _shrink(data, media)
+        if packed:
+            out.append(packed)
+        if len(out) >= SHOT_MAX_PER_RESULT:
+            break
+    return out
 
 
 def _result_text(content: Any) -> str:
@@ -420,7 +551,13 @@ class GuestTranslator:
             return events
         return []
 
-    def _tool_event(self, block: dict[str, Any], status: str, output: str = "") -> dict[str, Any]:
+    def _tool_event(
+        self,
+        block: dict[str, Any],
+        status: str,
+        output: str = "",
+        shots: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         tool_id = str(block.get("id") or uuid.uuid4())
         name = str(block.get("name") or self._tools.get(tool_id, {}).get("name") or "tool")
         payload = block.get("input") if isinstance(block.get("input"), dict) else {}
@@ -436,6 +573,8 @@ class GuestTranslator:
             "status": status,
             "output": output[:8000],
         }
+        if shots:
+            event["shots"] = shots
         diff = tool_diff(name, payload)
         if diff:
             event["diff"] = diff
@@ -474,13 +613,20 @@ class GuestTranslator:
                 continue
             tool_id = str(block.get("tool_use_id") or uuid.uuid4())
             is_error = bool(block.get("is_error"))
-            output = _result_text(block.get("content"))
+            content = block.get("content")
+            shots = _shots(content)
+            output = _result_text(content)
+            if shots and not _text_of(content if isinstance(content, list) else []):
+                # The picture is the whole result. "[image]" printed beside it
+                # is the old placeholder describing what is now on screen.
+                output = ""
             meta = self._tools.get(tool_id) or {}
             events.append(
                 self._tool_event(
                     {"id": tool_id, "name": meta.get("name") or "tool", "input": meta.get("input") or {}},
                     status="error" if is_error else "done",
                     output=output,
+                    shots=shots,
                 )
             )
         return events
@@ -1072,13 +1218,33 @@ class ClaudeChat:
                     else:
                         existing.update({k: v for k, v in item.items() if k != "delta"})
                     existing.pop("delta", None)
+                    if existing.get("shots"):
+                        self._trim_shots()
                     return
             stored = {k: v for k, v in item.items() if k != "delta"}
             self._history.append(stored)
+            if stored.get("shots"):
+                self._trim_shots()
             return
         if kind == "usage":
             self._history = [h for h in self._history if h.get("type") != "usage"]
         self._history.append(item)
+
+    def _trim_shots(self) -> None:
+        """Keep the pixels on the last few screenshots and drop the rest.
+
+        Every reconnect re-sends the whole history, and a phone in a cafe
+        reconnects a lot. The tool card stays where it was -- it goes back to
+        naming the image the way it did before there was anywhere to show it.
+        """
+        kept = 0
+        for item in reversed(self._history):
+            if not item.get("shots"):
+                continue
+            kept += 1
+            if kept > SHOT_HISTORY:
+                item.pop("shots", None)
+                item["output"] = item.get("output") or "[image]"
 
     async def _broadcast(self, event: dict[str, Any]) -> None:
         dead: list[WebSocket] = []

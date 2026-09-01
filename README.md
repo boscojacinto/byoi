@@ -22,6 +22,8 @@ Desk  :8080   check-in, floor, solution board
 Seat  :8786   HTTP UI on this PC (no cert warning)
 Seat  :8787   HTTPS guest PWA for phones
 Seat  :8788   mTLS control (desk → seat)
+Seat  :3000   the guest's dev server — their Claude looks at it with a
+              headless browser, and their phone opens it directly
 ```
 
 Full notes, including everything this page only summarises:
@@ -53,6 +55,8 @@ flowchart LR
     GUEST["Guest app :8787<br/>main.py · gate.py"]
     CTRL["Control :8788<br/>control.py, mTLS"]
     CHAT["claude_chat.py<br/>stream-json bridge"]
+    BROWSER["playwright-mcp<br/>headless chromium"]
+    DEV["Guest's dev server<br/>:3000"]
     WSPACE[("Workspace<br/>git + refs/byoi/")]
   end
 
@@ -81,6 +85,10 @@ flowchart LR
   GUEST --> CHAT
   CHAT --> CC
   CC --> ANTH
+  CC -->|"MCP · the one tool path Bash could not carry"| BROWSER
+  BROWSER --> DEV
+  PWA -.->|"p-SESSION.DOMAIN"| CADDY
+  CADDY -.-> DEV
   CHAT --> WSPACE
   GRADE -->|"reads refs/byoi/"| WSPACE
   DEPLOY --> VENDORS

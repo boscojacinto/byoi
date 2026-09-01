@@ -17,6 +17,28 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/* /root/.npm
 
+# A headless browser, reached as an MCP server rather than as a Bash command.
+# That is not a matter of taste: Claude Code's Bash safety classifier denies
+# anything off the allowlist *before* it emits a control request, so a browser
+# driven from Bash could never be approved from the phone (docs/salon.md, "Bash
+# approval"). MCP tools take the ordinary permission path, which the seat
+# already turns into an Allow / Deny card.
+#
+# Installed into its own tree rather than globally. @playwright/mcp pins an
+# exact, often prerelease, playwright, and chromium build ids are pinned per
+# playwright version -- installing the browser with any other copy of the CLI
+# lands a revision the server then refuses to launch. `install-browser` is the
+# server's own subcommand, so the two can never drift apart.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH=/opt/browser-mcp/node_modules/.bin:$PATH
+RUN mkdir -p /opt/browser-mcp \
+    && cd /opt/browser-mcp \
+    && npm init -y >/dev/null \
+    && npm install @playwright/mcp@0.0.80 \
+    && apt-get update \
+    && ./node_modules/.bin/playwright-mcp install-browser chromium --with-deps \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+
 WORKDIR /app
 # README.md is not documentation here: pyproject's `readme` field points at
 # it, so an editable install without it fails.
@@ -25,6 +47,9 @@ COPY src ./src
 RUN pip install --no-cache-dir -e ".[salon]"
 COPY apps ./apps
 COPY scripts ./scripts
+# Found by claude_chat.seat_mcp_config() at ROOT/deploy/seat-mcp.json, which is
+# the same relative path the salon PC uses out of a checkout.
+COPY deploy/seat-mcp.json ./deploy/seat-mcp.json
 
 ENV PYTHONPATH=/app:/app/src \
     BYOI_GUEST_TLS=0 \

@@ -298,6 +298,11 @@ def _run_args(session_id: str, *, tls_dir: Path, labels: list[str], seat: dict[s
         "-e", "BYOI_GUEST_RUNTIME_DIR=/run/byoi",
         "-e", f"BYOI_SEAT_TLS_NAME={name}",
     ]
+    # The address the guest's own phone can open their dev server on. Derived,
+    # not looked up: the route is published a moment later, and the container
+    # has to be told before it starts. Off when previews are switched off.
+    if caddy.preview_port() is not None:
+        args += ["-e", f"BYOI_PREVIEW_URL=https://{caddy.preview_hostname(session_id)}"]
     if labels:
         args += ["-e", f"BYOI_CLAUDE_ACCOUNT={labels[0]}"]
     # Only the accounts this visit was given. Mounting the pool would let one
@@ -345,6 +350,14 @@ def provision(store: Any, session: dict[str, Any], seat: dict[str, Any]) -> dict
     wait_until_ready(seat_row)
 
     host = caddy.publish(session_id, f"{name}:{GUEST_PORT}")
+    # Not worth a failed check-in. The seat route is the visit; the preview is a
+    # convenience on top of it, and a guest standing at the desk should not be
+    # turned away because the edge would not take a second route.
+    try:
+        preview = caddy.publish_preview(session_id, name)
+    except caddy.CaddyError as exc:
+        log.warning("BYOI: no preview route for session %s: %s", session_id, exc)
+        preview = None
     seat_sync.admit_session(seat_row, session)
 
     store.set_seat_runtime(
@@ -358,6 +371,7 @@ def provision(store: Any, session: dict[str, Any], seat: dict[str, Any]) -> dict
     return {
         "container_id": container_id[:12],
         "public_host": host,
+        "preview_host": preview,
         "agent_url": internal_url(session_id),
         "accounts": labels,
     }
