@@ -59,6 +59,8 @@ const state = {
   // keyed "g:"/"t:"/"k:" + id. Absent means "use the default for that row".
   expanded: {},
   sheet: null,
+  floorTab: "session",
+  boardTimerId: null,
   preview: "",
   files: null,
   filePath: "",
@@ -263,6 +265,7 @@ async function claim(boardId) {
     state.join.session = data.session || state.join.session;
     state.join.item = data.item || state.join.item;
     state.status = "brief claimed · open chat";
+    state.floorTab = "session";
   } catch (err) {
     state.status = err.message;
   } finally {
@@ -589,6 +592,25 @@ function ensureTimer() {
   if (state.timerId) return;
   tickTimer();
   state.timerId = setInterval(tickTimer, 1000);
+}
+
+// Keeps the Solutions tab current as the desk publishes new briefs, without
+// re-rendering over a guest who is mid-type in an open sheet (e.g. the BYO
+// code form) or looking at the session tab, where a board change is noise.
+async function pollBoard() {
+  if (state.view !== "floor" || !state.join) return;
+  try {
+    const data = await api("/api/board");
+    state.join.board = data.items || [];
+    if (state.floorTab === "solutions" && !state.sheet) render();
+  } catch {
+    // Quiet: the board just stays as it was until the next tick.
+  }
+}
+
+function ensureBoardPoll() {
+  if (state.boardTimerId) return;
+  state.boardTimerId = setInterval(pollBoard, 10000);
 }
 
 function fromHistory(item) {
@@ -1268,6 +1290,21 @@ function sheetWrap(title, inner) {
 }
 
 function sheetHTML() {
+  if (state.sheet === "floorMenu") {
+    return sheetWrap(
+      "Menu",
+      `<button type="button" class="item" id="menu-byo">${state.byo ? "Your Claude account" : "Use your own Claude account"}<span>${
+        state.byo
+          ? state.byoEmail
+            ? `Signed in as ${escapeHtml(state.byoEmail)}`
+            : "Signed in · running on your account"
+          : "Run this session on your own account instead of the salon's"
+      }</span></button>`
+    );
+  }
+  if (state.sheet === "byo") {
+    return sheetWrap("Your Claude account", byoHTML());
+  }
   if (state.sheet === "slash") {
     return sheetWrap(
       "Slash commands",
@@ -1378,44 +1415,41 @@ function floorHTML() {
       </article>`
     )
     .join("");
+  const tab = state.floorTab === "solutions" ? "solutions" : "session";
+  const sessionPanel = `
+    ${
+      claimed
+        ? `<div class="card"><h2>${escapeHtml(claimed.title)}</h2><p class="lede">${escapeHtml(claimed.brief)}</p>${
+            claimed.project ? `<p class="pill">${escapeHtml(claimed.project.name)}</p>` : ""
+          }</div>`
+        : `<p class="lede">Pick a solution on the Solutions tab.</p>`
+    }
+    ${state.status ? `<p class="status">${escapeHtml(state.status)}</p>` : ""}
+    <button class="btn" id="open-chat" ${state.busy || !session ? "disabled" : ""}>${state.busy ? "Opening…" : "Chat"}</button>
+    ${previewHTML(session)}
+    ${session && claimed && claimed.project ? `<button class="btn ghost" id="deploy" ${state.deploying ? "disabled" : ""}>${state.deploying ? "Deploying…" : "Deploy preview"}</button>` : ""}
+    ${deployHTML()}
+    ${session ? `<button class="btn ghost" id="shipped">I'm done</button>` : ""}
+    <button class="btn ghost" id="leave">Leave</button>`;
+  const solutionsPanel = briefs || "<p class='lede'>Nothing on the board yet.</p>";
   return `<div class="screen floor">
     <header>
-      <p class="eyebrow">BYOI</p>
+      <div class="floor-head-row">
+        <p class="eyebrow">BYOI</p>
+        <button type="button" class="icon-btn" id="floor-menu" aria-label="Menu">⋯</button>
+      </div>
       <h1>${escapeHtml(seat?.name || "Seat")}</h1>
       <p class="lede">${hello}</p>
       <p class="pill timer" id="session-timer" hidden></p>
     </header>
-    <section class="fold open" id="sessionFold">
-      <button type="button" class="fold-head" data-fold="sessionFold"><span>This session</span><span class="chevron">▾</span></button>
-      <div class="fold-body">
-        ${
-          claimed
-            ? `<div class="card"><h2>${escapeHtml(claimed.title)}</h2><p class="lede">${escapeHtml(claimed.brief)}</p>${
-                claimed.project ? `<p class="pill">${escapeHtml(claimed.project.name)}</p>` : ""
-              }</div>`
-            : `<p class="lede">Pick a solution below.</p>`
-        }
-        ${state.status ? `<p class="status">${escapeHtml(state.status)}</p>` : ""}
-        <button class="btn" id="open-chat" ${state.busy || !session ? "disabled" : ""}>${state.busy ? "Opening…" : "Chat"}</button>
-        ${previewHTML(session)}
-        ${session && claimed && claimed.project ? `<button class="btn ghost" id="deploy" ${state.deploying ? "disabled" : ""}>${state.deploying ? "Deploying…" : "Deploy preview"}</button>` : ""}
-        ${deployHTML()}
-        ${session ? `<button class="btn ghost" id="shipped">I'm done</button>` : ""}
-        <button class="btn ghost" id="leave">Leave</button>
-      </div>
+    <nav class="tabs">
+      <button type="button" class="tab ${tab === "session" ? "active" : ""}" data-tab="session">Session</button>
+      <button type="button" class="tab ${tab === "solutions" ? "active" : ""}" data-tab="solutions">Solutions${board.length ? ` · ${board.length}` : ""}</button>
+    </nav>
+    <section class="tab-panel">
+      ${tab === "session" ? sessionPanel : solutionsPanel}
     </section>
-    <section class="fold" id="byoFold">
-      <button type="button" class="fold-head" data-fold="byoFold"><span>Your Claude account</span><span class="chevron">▾</span></button>
-      <div class="fold-body">
-        ${byoHTML()}
-      </div>
-    </section>
-    <section class="fold open" id="boardFold">
-      <button type="button" class="fold-head" data-fold="boardFold"><span>Solutions</span><span class="chevron">▾</span></button>
-      <div class="fold-body">
-        ${briefs || "<p class='lede'>Nothing on the board yet.</p>"}
-      </div>
-    </section>
+    <div id="sheet-host">${sheetHTML()}</div>
   </div>`;
 }
 
@@ -1766,14 +1800,26 @@ function bind() {
   }
   const dep = $("#deploy");
   if (dep) dep.onclick = deploy;
-  document.querySelectorAll("[data-fold]").forEach((btn) => {
+  document.querySelectorAll("[data-tab]").forEach((btn) => {
     btn.onclick = () => {
-      const fold = document.getElementById(btn.getAttribute("data-fold"));
-      if (!fold) return;
-      fold.classList.toggle("open");
-      if (!$(".fold.open")) fold.classList.add("open");
+      state.floorTab = btn.getAttribute("data-tab");
+      render();
     };
   });
+  const floorMenu = $("#floor-menu");
+  if (floorMenu) {
+    floorMenu.onclick = () => {
+      state.sheet = state.sheet === "floorMenu" ? null : "floorMenu";
+      render();
+    };
+  }
+  const menuByo = $("#menu-byo");
+  if (menuByo) {
+    menuByo.onclick = () => {
+      state.sheet = "byo";
+      render();
+    };
+  }
   document.querySelectorAll("[data-claim]").forEach((btn) => {
     btn.onclick = () => claim(btn.getAttribute("data-claim"));
   });
@@ -2043,6 +2089,7 @@ async function boot() {
   }
   fitViewport();
   ensureTimer();
+  ensureBoardPoll();
   window.visualViewport?.addEventListener("resize", fitViewport);
   window.addEventListener("resize", fitViewport);
   const saved = loadStore();
