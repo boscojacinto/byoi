@@ -370,7 +370,7 @@ official app is still the only documented way to update firmware.
 | `apps/api/` | Desk — FastAPI, check-in, board, seats, grading, deploys, print queue |
 | `apps/seat/` | Seat — guest app, OTP gate, mTLS control, Claude Code bridge |
 | `apps/host-web/` · `apps/guest-web/` · `apps/coder/` | Desk UI, guest PWA, operator terminal |
-| `apps/guest/` | Optional Expo app, for when a phone will not take the salon CA |
+| `apps/guest/` | Optional Expo shell around that PWA, for a phone that will not take the salon CA |
 | `apps/templates/` | Project templates a brief can be seeded from |
 | `scripts/` | Bring-up, TLS, secrets, backup, and the counter's print relay |
 | `deploy/` | Dockerfiles, Compose, and the Caddyfile for the cloud shape |

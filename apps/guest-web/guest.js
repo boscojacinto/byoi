@@ -767,12 +767,8 @@ function handleLocalSlash(trimmed) {
     const body = state.messages
       .map((m) => `# ${m.kind}\n${m.text || m.detail || m.output || ""}\n`)
       .join("\n");
-    const blob = new Blob([body], { type: "text/plain" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "byoi-session.txt";
-    a.click();
-    localReply(trimmed, "Transcript downloaded as byoi-session.txt.");
+    const how = saveFile("byoi-session.txt", "text/plain", body);
+    localReply(trimmed, `Transcript ${how} as byoi-session.txt.`);
     return true;
   }
   if (cmd === "/handoff") {
@@ -780,6 +776,30 @@ function handleLocalSlash(trimmed) {
     return true;
   }
   return false;
+}
+
+// The shell is the Android app when it is hosting this page, and nothing at
+// all in a browser. It is how one copy of the guest UI still gives a phone the
+// phone-shaped answer: a browser downloads a file, the app offers the share
+// sheet, because an Android WebView never sees a blob: URL as a download.
+const shell = () => window.ReactNativeWebView || null;
+
+function toShell(payload) {
+  const host = shell();
+  if (!host) return false;
+  host.postMessage(JSON.stringify(payload));
+  return true;
+}
+
+// Returns the verb for what actually happened, so the reply in the log sends
+// the guest to the right place to find their file.
+function saveFile(name, mime, body) {
+  if (toShell({ type: "save", name, mime, body })) return "ready to share";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([body], { type: mime }));
+  a.download = name;
+  a.click();
+  return "downloaded";
 }
 
 async function downloadHandoff(trimmed) {
@@ -794,13 +814,9 @@ async function downloadHandoff(trimmed) {
       return;
     }
     const body = await res.text();
-    const blob = new Blob([body], { type: "text/markdown" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "byoi-handoff.md";
-    a.click();
+    const how = saveFile("byoi-handoff.md", "text/markdown", body);
     state.handoffAvailable = true;
-    localReply(trimmed || "/handoff", "Compact summary downloaded as byoi-handoff.md.");
+    localReply(trimmed || "/handoff", `Compact summary ${how} as byoi-handoff.md.`);
   } catch (err) {
     localReply(trimmed || "/handoff", err.message || "Could not download handoff.");
   }
@@ -1422,7 +1438,8 @@ function sheetHTML() {
 
 // One step back from wherever the guest is: the console overlay, then an open
 // sheet, then the chat itself. False means there was nothing left to close,
-// which is the back key's cue that back now means leaving.
+// which is the cue — to the back key here, and to an app shell hosting this
+// page — that back now means leaving the seat.
 function goBack() {
   const full = $("#term-full");
   if (full && !full.hidden) {
@@ -1465,6 +1482,18 @@ window.addEventListener("popstate", () => {
   }
   history.back();
 });
+
+// Leaving is the shell's business when there is one: the app's join screen has
+// the QR scanner, and this page's only has a box to type the code into.
+function leaveSeat() {
+  clearStore();
+  if (toShell({ type: "exit" })) return;
+  state.view = "join";
+  state.status = "Left the seat. Scan again to sit.";
+  render();
+}
+
+window.byoiBack = goBack;
 
 function render() {
   const app = $("#app");
@@ -1897,14 +1926,7 @@ function bind() {
   const open = $("#open-chat");
   if (open) open.onclick = openChat;
   const leave = $("#leave");
-  if (leave) {
-    leave.onclick = () => {
-      clearStore();
-      state.view = "join";
-      state.status = "Left the seat. Scan again to sit.";
-      render();
-    };
-  }
+  if (leave) leave.onclick = leaveSeat;
   const installBtn = $("#install");
   if (installBtn) installBtn.onclick = install;
   const ship = $("#shipped");

@@ -1,80 +1,61 @@
 import { useCallback, useEffect, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Linking from "expo-linking";
-import {
-  claimBrief,
-  completeSession,
-  fetchBoard,
-  joinSlip,
-  seatStatus,
-  unlockSeat,
-} from "./api";
 import Constants from "expo-constants";
+import { seatStatus } from "./api";
 import { guessSeatBase, normalizeBase, parseJoinUrl } from "./joinUrl";
-import FloorScreen from "./screens/FloorScreen";
 import JoinScreen from "./screens/JoinScreen";
 import ScanScreen from "./screens/ScanScreen";
-import ChatScreen from "./screens/ChatScreen";
+import SeatScreen from "./screens/SeatScreen";
 
 const LAST_SEAT = "byoi.seatBase";
 
+// Three screens, and only one of them is the salon: find a seat, read its QR,
+// then hand the visit to that seat's own guest UI in SeatScreen. Everything a
+// guest does once seated lives in apps/guest-web, so it stays the same UI
+// whether they came in through this app or through the browser on the slip.
 export default function App() {
   const [screen, setScreen] = useState("join");
   const [host, setHost] = useState("");
   const [otp, setOtp] = useState("");
   const [base, setBase] = useState("");
-  const [join, setJoin] = useState(null);
   const [status, setStatus] = useState("Same Wi-Fi as the seat PC. Scan the slip QR.");
   const [busy, setBusy] = useState(false);
-  const [ticket, setTicket] = useState("");
 
   const applyUrl = useCallback((raw) => {
     const parsed = parseJoinUrl(raw);
-    if (!parsed) return false;
+    if (!parsed) return null;
     if (parsed.base) setHost(parsed.base + (parsed.otp ? `/join?otp=${parsed.otp}` : ""));
     if (parsed.otp) setOtp(parsed.otp);
     return parsed;
   }, []);
 
-  const sit = useCallback(
-    async (rawHost, rawOtp) => {
-      const parsed = parseJoinUrl(rawHost) || { base: normalizeBase(rawHost), otp: rawOtp };
-      const nextBase = parsed.base || normalizeBase(rawHost);
-      const nextOtp = parsed.otp || (rawOtp || "").trim();
-      if (!nextBase) {
-        setStatus("Scan the slip QR, or paste the join URL from the host desk.");
-        return;
-      }
-      setBusy(true);
-      setStatus("reaching the seat…");
-      try {
-        await seatStatus(nextBase);
-        await AsyncStorage.setItem(LAST_SEAT, nextBase);
-        setBase(nextBase);
-        setOtp(nextOtp);
-        if (nextOtp) {
-          const data = await joinSlip(nextBase, nextOtp);
-          setJoin({
-            ...data,
-            board: data.board || [],
-            item: data.item || null,
-          });
-          setStatus(`${data.seat?.name || "Seat"} · hello ${data.session?.coder_name || ""}`);
-        } else {
-          const board = await fetchBoard(nextBase);
-          setJoin({ session: null, seat: null, board, wifi_ssid: null });
-          setStatus("Seat is up. Scan the slip QR to unlock your session.");
-        }
-        setScreen("floor");
-      } catch (err) {
-        setStatus(err.message || "Cannot reach the seat. Same Wi-Fi? Seat agent on :8787?");
-        setScreen("join");
-      } finally {
-        setBusy(false);
-      }
-    },
-    []
-  );
+  const sit = useCallback(async (rawHost, rawOtp) => {
+    const parsed = parseJoinUrl(rawHost) || { base: normalizeBase(rawHost), otp: rawOtp };
+    const nextBase = parsed.base || normalizeBase(rawHost);
+    const nextOtp = parsed.otp || (rawOtp || "").trim();
+    if (!nextBase) {
+      setStatus("Scan the slip QR, or paste the join URL from the host desk.");
+      return;
+    }
+    setBusy(true);
+    setStatus("reaching the seat…");
+    try {
+      // Ask the seat before opening it, so a phone on the wrong Wi-Fi gets
+      // told that here rather than as a blank page inside the WebView.
+      await seatStatus(nextBase);
+      await AsyncStorage.setItem(LAST_SEAT, nextBase);
+      setBase(nextBase);
+      setOtp(nextOtp);
+      setScreen("seat");
+      setStatus("");
+    } catch (err) {
+      setStatus(err.message || "Cannot reach the seat. Same Wi-Fi? Seat agent on :8787?");
+      setScreen("join");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -95,51 +76,6 @@ export default function App() {
     return () => sub.remove();
   }, [applyUrl, sit]);
 
-  async function onClaim(boardId) {
-    if (!join?.session) return;
-    setBusy(true);
-    try {
-      const data = await claimBrief(base, join.session.id, boardId);
-      setJoin((prev) => ({
-        ...prev,
-        session: data.session || prev.session,
-        item: data.item || prev.item,
-      }));
-      setStatus("brief claimed · open chat");
-    } catch (err) {
-      setStatus(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onAttach() {
-    setBusy(true);
-    try {
-      const data = await unlockSeat(base, otp, join?.session?.id);
-      setTicket(data.ticket || "");
-      setScreen("chat");
-    } catch (err) {
-      setStatus(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onShipped() {
-    if (!join?.session) return;
-    setBusy(true);
-    try {
-      await completeSession(base, join.session.id);
-      setStatus("shipped. leave the seat.");
-      setJoin((prev) => ({ ...prev, session: { ...prev.session, status: "done" } }));
-    } catch (err) {
-      setStatus(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   if (screen === "scan") {
     return (
       <ScanScreen
@@ -158,19 +94,11 @@ export default function App() {
     );
   }
 
-  if (screen === "chat" && base) {
-    return <ChatScreen base={base} ticket={ticket} otp={otp} onClose={() => setScreen("floor")} />;
-  }
-
-  if (screen === "floor") {
+  if (screen === "seat" && base) {
     return (
-      <FloorScreen
-        join={join}
-        status={status}
-        busy={busy}
-        onClaim={onClaim}
-        onAttach={onAttach}
-        onShipped={onShipped}
+      <SeatScreen
+        base={base}
+        otp={otp}
         onLeave={() => {
           setScreen("join");
           setStatus("Left the seat. Scan again to sit.");
