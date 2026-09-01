@@ -98,18 +98,21 @@ function closeModal(id) {
 function resetSitModal() {
   $("qrStage").hidden = true;
   $("qr").removeAttribute("src");
+  $("qrGuest").textContent = "";
+  $("qrSeat").textContent = "";
+  $("qrProject").textContent = "";
   $("checkin").hidden = false;
   $("sitTitle").textContent = "Sit a guest";
   $("sitModal").querySelector(".modal-card").classList.remove("has-qr");
 }
 
-async function waitForSeat(started, msg, tries = 90) {
+async function waitForSeat(started, msg, coderName, seatName, tries = 90) {
   msg.textContent = "Raising the seat…";
   for (let i = 0; i < tries; i += 1) {
     const state = await api(started.poll);
     if (state.state === "ready") {
       msg.textContent = "";
-      showQrOnly();
+      showQrOnly(coderName, seatName);
       return state;
     }
     if (state.state === "failed") {
@@ -147,10 +150,13 @@ async function refreshPrinter() {
   }
 }
 
-function showQrOnly() {
+function showQrOnly(coderName, seatName) {
   $("checkin").hidden = true;
   $("checkinMsg").textContent = "";
   $("sitTitle").textContent = "";
+  $("qrGuest").textContent = coderName || "";
+  $("qrSeat").textContent = seatName ? `Seat · ${seatName}` : "";
+  $("qrProject").textContent = "Project · not picked yet";
   $("qrStage").hidden = false;
   $("qr").src = "/last-qr.png?t=" + Date.now();
   $("sitModal").querySelector(".modal-card").classList.add("has-qr");
@@ -505,21 +511,23 @@ $("checkin").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const msg = $("checkinMsg");
   msg.textContent = "Printing slip…";
+  const coderName = $("coderName").value;
+  const seatName = $("seatSel").selectedOptions[0] ? $("seatSel").selectedOptions[0].textContent : "";
   try {
     const started = await api("/api/sessions/check-in", {
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({
         seat_id: $("seatSel").value,
-        coder_name: $("coderName").value,
+        coder_name: coderName,
       }),
     });
     if (started.state === "preparing") {
       // The seat is a container being raised right now. Showing the QR before
       // it answers would hand the guest a code for an address that 404s.
-      await waitForSeat(started, msg);
+      await waitForSeat(started, msg, coderName, seatName);
     } else {
-      showQrOnly();
+      showQrOnly(coderName, seatName);
     }
     await refresh();
   } catch (err) {
