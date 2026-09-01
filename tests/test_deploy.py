@@ -247,7 +247,41 @@ def test_deploy_records_the_project_and_unprotects_it(tmp_path, monkeypatch):
     )
     result = deploy.run(session_id="sid", source=info["toplevel"], ref=info["ref"])
     assert unprotected == ["prj_9"]
-    assert {"kind": "vercel_project", "provider": "vercel", "id": "prj_9", "env": {}} in result["resources"]
+    # The project id/org id come back on the result so the caller can persist
+    # them onto the desk project — but nothing in `resources` marks the
+    # project itself for teardown, since it now outlives this one deploy.
+    assert result["vercel_project_id"] == "prj_9"
+    assert result["vercel_org_id"] == "org_9"
+    assert result["resources"] == []
+
+
+def test_deploy_reuses_a_known_vercel_project(tmp_path, monkeypatch):
+    fake = _fake_bin(tmp_path, FAKE_VERCEL)
+    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
+    monkeypatch.setenv("BYOI_VERCEL", str(fake))
+    monkeypatch.setenv("BYOI_DEPLOY_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("BYOI_VERCEL_PUBLIC", "0")
+    src = _repo(tmp_path / "proj", {"byoi.json": '{"framework":"nextjs","needs":[]}'})
+    from apps.seat.submission import capture
+
+    info = capture(cwd=src, session_id="sid", kind="deploy")
+    result = deploy.run(
+        session_id="sid",
+        source=info["toplevel"],
+        ref=info["ref"],
+        vercel_project_id="prj_known",
+        vercel_org_id="org_known",
+    )
+    # .vercel/project.json is pre-seeded before `vercel deploy` runs, so a
+    # second solution on the same desk project lands on the same Vercel
+    # project instead of the CLI minting a new one.
+    dest = tmp_path / "runs" / "sid"
+    assert json.loads((dest / ".vercel" / "project.json").read_text()) == {
+        "projectId": "prj_known",
+        "orgId": "org_known",
+    }
+    assert result["vercel_project_id"] == "prj_known"
+    assert result["vercel_org_id"] == "org_known"
 
 
 def test_public_can_be_switched_off(tmp_path, monkeypatch):
@@ -267,28 +301,15 @@ def test_public_can_be_switched_off(tmp_path, monkeypatch):
     assert called == []
 
 
-def test_teardown_deletes_the_project(tmp_path, monkeypatch):
+def test_teardown_removes_the_deployment_but_leaves_the_shared_project(tmp_path, monkeypatch):
     monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
     monkeypatch.setenv("BYOI_VERCEL", str(_fake_bin(tmp_path, FAKE_VERCEL)))
-    deleted: list[str] = []
-    monkeypatch.setattr(deploy, "delete_project", lambda pid, token: deleted.append(pid))
     out = deploy.teardown(
         {"url": "https://x.vercel.app", "resources": [{"kind": "vercel_project", "id": "prj_9"}]}
     )
     assert out["ok"] is True
-    assert deleted == ["prj_9"]
-
-
-def test_teardown_reports_a_project_it_could_not_delete(tmp_path, monkeypatch):
-    monkeypatch.setenv("BYOI_VERCEL_TOKEN", "tok")
-    monkeypatch.setenv("BYOI_VERCEL", str(_fake_bin(tmp_path, FAKE_VERCEL)))
-
-    def boom(pid, token):
-        raise DeployError("409 in use")
-
-    monkeypatch.setattr(deploy, "delete_project", boom)
-    out = deploy.teardown(
-        {"url": "https://x.vercel.app", "resources": [{"kind": "vercel_project", "id": "prj_9"}]}
-    )
-    assert out["ok"] is False
-    assert "409 in use" in out["problems"][0]
+    argv = (tmp_path / "argv.log").read_text()
+    assert "remove https://x.vercel.app" in argv
+    # No project-delete call: the desk project's Vercel project is shared
+    # across guests now, so freeing a seat must not take it down.
+    assert "prj_9" not in argv

@@ -63,6 +63,32 @@ def test_claim_pushes_workspace_to_seat(tmp_path: Path, monkeypatch):
     assert claimed.json()["project"]["name"] == "work"
 
 
+def test_claiming_a_second_solution_on_a_busy_project_is_409(tmp_path: Path, monkeypatch):
+    desk = _desk(tmp_path)
+    folder = tmp_path / "work"
+    folder.mkdir()
+    proj = desk.post("/api/projects", json={"kind": "local", "path": str(folder), "name": "work"}).json()
+    first = desk.post(
+        "/api/board",
+        json={"title": "Fix the header", "brief": "edit it", "project_id": proj["id"]},
+    ).json()
+    second = desk.post(
+        "/api/board",
+        json={"title": "Fix the footer", "brief": "edit it", "project_id": proj["id"]},
+    ).json()
+    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: {"ok": True})
+
+    ada = desk.post("/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}).json()
+    ada_id = ada["session"]["id"]
+    claimed = desk.post(f"/api/sessions/{ada_id}/claim", json={"board_id": first["id"]})
+    assert claimed.status_code == 200
+
+    bea = desk.post("/api/sessions/check-in", json={"seat_id": "seat-2", "coder_name": "Bea"}).json()
+    bea_id = bea["session"]["id"]
+    blocked = desk.post(f"/api/sessions/{bea_id}/claim", json={"board_id": second["id"]})
+    assert blocked.status_code == 409
+
+
 def test_create_github_repo_uses_gh(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("BYOI_PROJECTS_DIR", str(tmp_path / "projects"))
     dest = tmp_path / "projects" / "neon"

@@ -12,6 +12,10 @@ from typing import Any
 from . import seed_board
 
 
+class ProjectBusy(RuntimeError):
+    """Another live session already holds this project."""
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seats (
     id TEXT PRIMARY KEY,
@@ -33,7 +37,12 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     github TEXT,
     local_path TEXT NOT NULL,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    -- Set from the first deploy of any solution on this project, so every
+    -- later deploy — this guest's or the next guest's — lands on the same
+    -- Vercel project instead of minting a new one per visit.
+    vercel_project_id TEXT,
+    vercel_org_id TEXT
 );
 CREATE TABLE IF NOT EXISTS board (
     id TEXT PRIMARY KEY,
@@ -127,6 +136,10 @@ class Store:
             self.conn.execute("ALTER TABLE projects ADD COLUMN framework TEXT")
         if "template" not in proj_cols:
             self.conn.execute("ALTER TABLE projects ADD COLUMN template TEXT")
+        if "vercel_project_id" not in proj_cols:
+            self.conn.execute("ALTER TABLE projects ADD COLUMN vercel_project_id TEXT")
+        if "vercel_org_id" not in proj_cols:
+            self.conn.execute("ALTER TABLE projects ADD COLUMN vercel_org_id TEXT")
         sess_cols = self._columns("sessions")
         if "test_status" not in sess_cols:
             self.conn.execute("ALTER TABLE sessions ADD COLUMN test_status TEXT")
@@ -353,6 +366,15 @@ class Store:
         )
         self.conn.commit()
 
+    def set_project_vercel(self, project_id: str, *, vercel_project_id: str, vercel_org_id: str) -> None:
+        """Record the Vercel project a desk project deploys to, first-write-wins."""
+        self.conn.execute(
+            "UPDATE projects SET vercel_project_id=?, vercel_org_id=? "
+            "WHERE id=? AND vercel_project_id IS NULL",
+            (vercel_project_id, vercel_org_id, project_id),
+        )
+        self.conn.commit()
+
     def board(self, published_only: bool = True) -> list[dict[str, Any]]:
         sql = "SELECT * FROM board"
         if published_only:
@@ -517,6 +539,23 @@ class Store:
         ).fetchall()
         return [self._session_dict(row) for row in rows if row]  # type: ignore[misc]
 
+    def active_session_for_project(
+        self, project_id: str | None, *, exclude_session_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """The other live session already claimed onto this project, if any."""
+        if not project_id:
+            return None
+        sql = (
+            "SELECT s.* FROM sessions s JOIN board b ON b.id = s.board_id "
+            "WHERE b.project_id=? AND s.status IN ('checked_in','active')"
+        )
+        args: list[Any] = [project_id]
+        if exclude_session_id:
+            sql += " AND s.id != ?"
+            args.append(exclude_session_id)
+        row = self.conn.execute(sql, args).fetchone()
+        return self._session_dict(row)
+
     def claim(self, session_id: str, board_id: str) -> dict[str, Any]:
         item = self.board_item(board_id)
         if not item:
@@ -524,6 +563,10 @@ class Store:
         sess = self.session(session_id)
         if not sess:
             raise KeyError("unknown session")
+        project_id = item.get("project_id")
+        other = self.active_session_for_project(project_id, exclude_session_id=session_id)
+        if other:
+            raise ProjectBusy("another guest is already working on this project")
         ends = sess["started_at"] + item["wellness_minutes"] * 60
         self.conn.execute(
             "UPDATE sessions SET board_id=?, status='active', ends_at=? WHERE id=?",
