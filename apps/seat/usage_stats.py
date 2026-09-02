@@ -61,7 +61,14 @@ def _transcripts(config_dir: Path) -> list[Path]:
     return [path for _mtime, path in files[:MAX_FILES]]
 
 
-def usage_report(config_dir: Path | None, *, days: int = 14, hours: int = 48) -> dict[str, Any]:
+def usage_report(
+    config_dir: Path | None,
+    *,
+    days: int = 14,
+    hours: int = 48,
+    since: float | None = None,
+    until: float | None = None,
+) -> dict[str, Any]:
     empty = {"daily": [], "hourly": [], "totals": _bucket(), "window_days": days}
     if config_dir is None:
         return empty
@@ -104,6 +111,11 @@ def usage_report(config_dir: Path | None, *, days: int = 14, hours: int = 48) ->
             try:
                 ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone()
             except ValueError:
+                continue
+            ts_epoch = ts.timestamp()
+            if since is not None and ts_epoch < since:
+                continue
+            if until is not None and ts_epoch > until:
                 continue
             day_key = ts.strftime("%Y-%m-%d")
             hour_key = ts.strftime("%Y-%m-%dT%H:00")

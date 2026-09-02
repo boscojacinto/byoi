@@ -175,19 +175,42 @@ def list_accounts(request: Request, authorization: str | None = Header(default=N
 
 
 @app.get("/local/usage")
-def usage(request: Request, authorization: str | None = Header(default=None)) -> dict:
-    """Rate-limit snapshot plus a day/hour token breakdown, for the floor's usage panel."""
+def usage(
+    request: Request,
+    label: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Rate-limit snapshot plus day/hour token breakdowns, for the floor's usage panel.
+
+    `label` picks which Claude account to report on — the seat this chair is
+    assigned, not necessarily whoever is live right now (one seat process can
+    serve several named chairs in `static` mode). `stats` is that account's
+    full history ("Seat"); `guest_stats`, present only when `since` is given,
+    is the same account restricted to one visit's window ("Guest").
+    """
     _require_host(request, authorization)
     from .claude_chat import session as chat_session
     from .usage_stats import usage_report
 
     chat_session.refresh_quota()
+    if label:
+        account = chat_session.pool.get(label)
+        is_live = account is not None and account.label == chat_session.account_label
+        config_dir = account.config_dir if account else None
+        resolved_label = account.label if account else label
+    else:
+        is_live = True
+        config_dir = chat_session.config_dir
+        resolved_label = chat_session.account_label
     return {
         "seat_id": SEAT_ID,
-        "account": chat_session.account_label,
-        "guest_name": gate.snapshot().get("coder_name"),
-        "quota": chat_session.quota,
-        "stats": usage_report(chat_session.config_dir),
+        "account": resolved_label,
+        "guest_name": gate.snapshot().get("coder_name") if is_live else None,
+        "quota": chat_session.quota if is_live else None,
+        "stats": usage_report(config_dir),
+        "guest_stats": usage_report(config_dir, since=since, until=until) if since is not None else None,
     }
 
 

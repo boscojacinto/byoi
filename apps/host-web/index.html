@@ -30,6 +30,16 @@
       <article class="card floor-hero">
         <p class="eyebrow">Floor</p>
         <div id="today" class="today"></div>
+        <div class="usage-graph">
+          <div class="usage-graph-head">
+            <h3>Usage</h3>
+            <div class="usage-filter">
+              <button type="button" class="chip is-on" data-usage-group="seat">Seats</button>
+              <button type="button" class="chip" data-usage-group="guest">Guests</button>
+            </div>
+          </div>
+          <div id="usageChart" class="usage-chart-wrap"><p class="quiet">Loading…</p></div>
+        </div>
       </article>
       <article class="card floor-seats">
         <div class="card-head">

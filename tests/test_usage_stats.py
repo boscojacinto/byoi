@@ -64,3 +64,27 @@ def test_usage_report_caps_lines(tmp_path: Path, monkeypatch):
 
     report = usage_report(tmp_path)
     assert report["totals"]["messages"] == 3
+
+
+def test_usage_report_since_and_until_scope_one_visit(tmp_path: Path):
+    """The account's transcripts span many visits; since/until isolate one."""
+    base = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+    transcript = tmp_path / "projects" / "proj" / "session.jsonl"
+    entries = [
+        _assistant(base - timedelta(hours=5), input_tokens=1000, output_tokens=0),  # earlier guest
+        _assistant(base, input_tokens=10, output_tokens=20),  # this guest's visit
+        _assistant(base + timedelta(minutes=30), input_tokens=5, output_tokens=5),  # this guest's visit
+        _assistant(base + timedelta(hours=3), input_tokens=2000, output_tokens=0),  # next guest
+    ]
+    _write_transcript(transcript, entries)
+
+    since = base.timestamp()
+    until = (base + timedelta(hours=1)).timestamp()
+    report = usage_report(tmp_path, since=since, until=until)
+
+    assert report["totals"]["messages"] == 2
+    assert report["totals"]["input_tokens"] == 15
+    assert report["totals"]["output_tokens"] == 25
+
+    unfiltered = usage_report(tmp_path)
+    assert unfiltered["totals"]["messages"] == 4

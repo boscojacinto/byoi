@@ -222,16 +222,29 @@ def list_accounts(seat: dict[str, Any] | None = None) -> dict[str, Any]:
     return res.json() if res.content else {"accounts": []}
 
 
-def usage_stats(seat: dict[str, Any] | None = None) -> dict[str, Any]:
+def usage_stats(
+    seat: dict[str, Any] | None = None,
+    *,
+    label: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+) -> dict[str, Any]:
     url = control_base(seat) + "/local/usage"
+    params: dict[str, Any] = {}
+    if label:
+        params["label"] = label
+    if since is not None:
+        params["since"] = since
+    if until is not None:
+        params["until"] = until
     try:
         with _client() as client:
-            res = client.get(url, headers=_headers())
+            res = client.get(url, headers=_headers(), params=params)
     except httpx.HTTPError as exc:
         raise SeatSyncError(0, str(exc)) from exc
     if res.status_code >= 400:
         raise SeatSyncError(res.status_code, res.text)
-    return res.json() if res.content else {"quota": None, "stats": None}
+    return res.json() if res.content else {"quota": None, "stats": None, "guest_stats": None}
 
 
 def revoke_session(seat: dict[str, Any] | None) -> dict[str, Any]:

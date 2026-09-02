@@ -580,6 +580,17 @@ class Store:
         ).fetchall()
         return [self._session_dict(row) for row in rows if row]  # type: ignore[misc]
 
+    def sessions_since(self, cutoff: float) -> list[dict[str, Any]]:
+        """Visits worth charting: started within the window, plus any still live
+        regardless of how old — `ends_at` is a *planned* wellness cutoff, not an
+        actual end time, so a still-active old visit must not be dropped."""
+        rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE started_at>=? OR status IN ('checked_in','active') "
+            "ORDER BY started_at DESC",
+            (cutoff,),
+        ).fetchall()
+        return [self._session_dict(row) for row in rows if row]  # type: ignore[misc]
+
     def active_session_for_project(
         self, project_id: str | None, *, exclude_session_id: str | None = None
     ) -> dict[str, Any] | None:

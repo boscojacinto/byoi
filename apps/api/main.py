@@ -8,6 +8,7 @@ import os
 import ssl
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -46,6 +47,10 @@ log = logging.getLogger("uvicorn.error")
 
 ROOT = Path(__file__).resolve().parents[2]
 SALON_NAME = os.environ.get("BYOI_SALON_NAME", "BYOI salon · cafe")
+
+
+def _date_str(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).astimezone().strftime("%Y-%m-%d")
 
 
 # How long after the relay last polled we still call the printer online.
@@ -330,10 +335,85 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         seat = store.seat(seat_id)
         if not seat:
             raise HTTPException(404, "unknown seat")
+        sess = seat.get("session")
         try:
-            return seat_sync.usage_stats(seat)
+            return seat_sync.usage_stats(
+                seat,
+                label=seat.get("claude_label"),
+                since=sess["started_at"] if sess else None,
+            )
         except SeatSyncError as exc:
-            return {"error": str(exc), "quota": None, "stats": None, "guest_name": None}
+            return {
+                "error": str(exc),
+                "quota": None,
+                "stats": None,
+                "guest_stats": None,
+                "guest_name": None,
+            }
+
+    @app.get("/api/usage/timeseries")
+    def usage_timeseries(
+        request: Request,
+        group_by: str = "seat",
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        """Daily token totals for the floor's usage graph.
+
+        `seat` is one line per chair — that chair's Claude account's full
+        history. `guest` is one line per guest name, built from the salon's own
+        visit history (started_at..ends_at, or "still live" -> now) rather than
+        the account's raw timeline, since one account can serve many guests.
+        """
+        require_operator(request, authorization)
+        window_days = 14
+        cutoff = time.time() - window_days * 86400
+        seats_list = store.seats()
+
+        if group_by == "guest":
+            merged: dict[str, dict[str, int]] = {}
+            for sess in store.sessions_since(cutoff):
+                seat = next((s for s in seats_list if s["id"] == sess["seat_id"]), None)
+                if not seat:
+                    continue
+                labels = sess.get("account_labels") or (
+                    [seat["claude_label"]] if seat.get("claude_label") else []
+                )
+                until = sess.get("ends_at") or time.time()
+                bucket = merged.setdefault(sess["coder_name"], {})
+                for label in labels:
+                    try:
+                        resp = seat_sync.usage_stats(
+                            seat, label=label, since=sess["started_at"], until=until
+                        )
+                    except SeatSyncError:
+                        continue
+                    for day in (resp.get("guest_stats") or {}).get("daily") or []:
+                        bucket[day["date"]] = bucket.get(day["date"], 0) + day["total_tokens"]
+            series = [
+                {"key": name, "points": [{"date": d, "total_tokens": t} for d, t in sorted(pts.items())]}
+                for name, pts in merged.items()
+                if pts
+            ]
+        else:
+            series = []
+            for seat in seats_list:
+                label = seat.get("claude_label")
+                if not label:
+                    continue
+                try:
+                    resp = seat_sync.usage_stats(seat, label=label)
+                except SeatSyncError:
+                    continue
+                daily = (resp.get("stats") or {}).get("daily") or []
+                points = [
+                    {"date": d["date"], "total_tokens": d["total_tokens"]}
+                    for d in daily
+                    if d["date"] >= _date_str(cutoff)
+                ]
+                if points:
+                    series.append({"key": seat["name"], "points": points})
+
+        return {"group_by": group_by, "days": window_days, "series": series}
 
     @app.get("/api/sessions/{session_id}/handoff")
     def session_handoff(session_id: str) -> Response:
