@@ -248,6 +248,51 @@ form button, .checkin button[type="submit"] {
   border: 1px solid rgba(224, 168, 92, 0.5);
 }
 
+.usage-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 0.35rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.usage-chip:hover, .usage-chip:focus-visible { border-color: var(--neon); color: var(--ink); }
+.usage-chip span { display: block; }
+
+.usage-badges { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+.usage-badge {
+  background: rgba(8, 14, 10, 0.7);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.5rem 0.8rem;
+  min-width: 8rem;
+}
+.usage-badge strong { display: block; font-size: 1.3rem; color: var(--neon); }
+.usage-badge span { color: var(--muted); font-size: 0.78rem; }
+.usage-panel h3 {
+  margin: 0.8rem 0 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.usage-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.usage-table th, .usage-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid rgba(61, 255, 138, 0.1);
+}
+.usage-table th { color: var(--muted); font-weight: 600; }
+.usage-table td:nth-child(2), .usage-table td:nth-child(3),
+.usage-table th:nth-child(2), .usage-table th:nth-child(3) { text-align: right; }
+
 .health {
   display: flex;
   align-items: center;

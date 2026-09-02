@@ -116,6 +116,37 @@ def test_control_live_mirrors_chat_history():
     assert "account" in body
 
 
+def test_control_usage_reports_guest_and_quota(tmp_path):
+    control = TestClient(control_app)
+    control.post(
+        "/local/admit",
+        json={"otp": "deadbeef", "session_id": "abc", "coder_name": "Ada"},
+        headers=HOST,
+    )
+    from apps.seat.claude_chat import session as chat_session
+
+    # assign_preferred can fall back to the real ~/.claude account when the
+    # isolated accounts dir is empty — pin config_dir so stats stay empty.
+    chat_session.config_dir = tmp_path
+    chat_session.quota = {
+        "five_hour": 82,
+        "five_hour_resets": 1900000000,
+        "seven_day": 12,
+        "seven_day_resets": 1900500000,
+    }
+    denied = control.get("/local/usage")
+    assert denied.status_code == 401
+    res = control.get("/local/usage", headers=HOST)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["guest_name"] == "Ada"
+    assert body["quota"]["five_hour"] == 82
+    assert body["quota"]["seven_day_resets"] == 1900500000
+    assert body["stats"]["daily"] == []
+    assert body["stats"]["hourly"] == []
+    assert body["seat_id"]
+
+
 def test_handoff_requires_ticket_then_404():
     control = TestClient(control_app)
     guest = TestClient(app)
