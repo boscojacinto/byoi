@@ -534,12 +534,15 @@ async function refresh() {
       const lines = quotaLines(snap.quota);
       const handoff = sess && (snap.handoff || snap.handoff_text);
       const sub = sess ? `${escapeHtml(sess.coder_name)}${account ? ` · ${escapeHtml(account)}` : ""}` : "Ready";
-      const usageChip =
-        sess && lines.length
-          ? `<button type="button" class="usage-chip" data-usage="${s.id}" data-seat-name="${escapeHtml(s.name)}" data-guest="${escapeHtml(sess.coder_name)}">${lines
-              .map((l) => `<span>${escapeHtml(l)}</span>`)
-              .join("")}</button>`
-          : "";
+      // The 5h/7d % never shows up for a real Claude Code account (statusLine
+      // is never invoked under stream-json — see docs/salon.md), so the chip
+      // must not depend on quota lines existing: the day/hour breakdown it
+      // opens reads transcripts directly and works with no quota at all.
+      const usageChip = sess
+        ? `<button type="button" class="usage-chip" data-usage="${s.id}" data-seat-name="${escapeHtml(s.name)}" data-guest="${escapeHtml(sess.coder_name)}">${
+            lines.length ? lines.map((l) => `<span>${escapeHtml(l)}</span>`).join("") : `<span>Usage</span>`
+          }</button>`
+        : "";
       return `<article class="seat ${sess ? "occupied" : ""} ${limited ? "limited" : ""}">
         <div><strong>${escapeHtml(s.name)}</strong><span class="quiet">${sub}</span>${usageChip}</div>
         <div class="seat-actions">
