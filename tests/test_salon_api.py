@@ -243,6 +243,44 @@ def test_api_live_mirrors_guest_history(tmp_path: Path, monkeypatch):
     assert client.get("/api/live").status_code == 401
 
 
+def test_api_seat_usage_proxies_seat_and_requires_operator(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    monkeypatch.setattr(
+        "apps.api.seat_sync.usage_stats",
+        lambda seat: {
+            "seat_id": seat["id"],
+            "account": "claude-seat-1",
+            "guest_name": "Ada",
+            "quota": {"five_hour": 82, "five_hour_resets": 1900000000},
+            "stats": {"daily": [], "hourly": [], "totals": {}, "window_days": 14},
+        },
+    )
+    assert client.get("/api/seats/seat-1/usage").status_code == 401
+    assert client.get("/api/seats/no-such-seat/usage", headers=headers).status_code == 404
+    res = client.get("/api/seats/seat-1/usage", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["guest_name"] == "Ada"
+    assert body["quota"]["five_hour"] == 82
+    assert body["stats"]["window_days"] == 14
+
+
+def test_api_seat_usage_survives_seat_sync_error(tmp_path: Path, monkeypatch):
+    from apps.api.seat_sync import SeatSyncError
+
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+
+    def _boom(seat):
+        raise SeatSyncError(503, "seat unreachable")
+
+    monkeypatch.setattr("apps.api.seat_sync.usage_stats", _boom)
+    res = client.get("/api/seats/seat-1/usage", headers=headers)
+    assert res.status_code == 200
+    assert res.json()["stats"] is None
+
+
 def test_guest_result_shows_pass_fail_without_the_suite(tmp_path: Path):
     """The phone gets every case and a reason; the desk keeps the raw report.
 

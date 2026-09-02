@@ -322,6 +322,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except SeatSyncError:
             return {"accounts": [], "account": None, "quota": None, "handoff": False}
 
+    @app.get("/api/seats/{seat_id}/usage")
+    def seat_usage(
+        seat_id: str, request: Request, authorization: str | None = Header(default=None)
+    ) -> dict:
+        require_operator(request, authorization)
+        seat = store.seat(seat_id)
+        if not seat:
+            raise HTTPException(404, "unknown seat")
+        try:
+            return seat_sync.usage_stats(seat)
+        except SeatSyncError as exc:
+            return {"error": str(exc), "quota": None, "stats": None, "guest_name": None}
+
     @app.get("/api/sessions/{session_id}/handoff")
     def session_handoff(session_id: str) -> Response:
         from apps.seat.accounts import read_handoff

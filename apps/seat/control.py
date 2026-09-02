@@ -174,6 +174,23 @@ def list_accounts(request: Request, authorization: str | None = Header(default=N
     }
 
 
+@app.get("/local/usage")
+def usage(request: Request, authorization: str | None = Header(default=None)) -> dict:
+    """Rate-limit snapshot plus a day/hour token breakdown, for the floor's usage panel."""
+    _require_host(request, authorization)
+    from .claude_chat import session as chat_session
+    from .usage_stats import usage_report
+
+    chat_session.refresh_quota()
+    return {
+        "seat_id": SEAT_ID,
+        "account": chat_session.account_label,
+        "guest_name": gate.snapshot().get("coder_name"),
+        "quota": chat_session.quota,
+        "stats": usage_report(chat_session.config_dir),
+    }
+
+
 @app.post("/local/account")
 async def switch_account(
     request: Request, body: AccountIn, authorization: str | None = Header(default=None)

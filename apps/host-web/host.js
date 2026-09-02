@@ -361,12 +361,88 @@ async function refreshQAGrading() {
       .join("") || `<p class="quiet">Nothing graded yet — results appear here once a guest taps “I’m done”.</p>`;
 }
 
-function quotaLabel(quota) {
-  if (!quota) return "";
-  const bits = [];
-  if (quota.five_hour != null) bits.push(`5h ${Math.round(quota.five_hour)}%`);
-  if (quota.seven_day != null) bits.push(`7d ${Math.round(quota.seven_day)}%`);
-  return bits.join(" · ");
+function formatResetTime(epoch) {
+  if (epoch == null) return "";
+  const ms = Number(epoch) * 1000;
+  if (!Number.isFinite(ms)) return "";
+  const diff = ms - Date.now();
+  if (diff <= 0) return "now";
+  const mins = Math.round(diff / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  if (hrs < 24) return `in ${hrs}h${rem ? ` ${rem}m` : ""}`;
+  const d = new Date(ms);
+  return `${d.toLocaleDateString(undefined, { weekday: "short" })} ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function formatHourLabel(hourKey) {
+  const d = new Date(hourKey);
+  if (Number.isNaN(d.getTime())) return hourKey;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" });
+}
+
+function quotaLines(quota) {
+  if (!quota) return [];
+  const lines = [];
+  if (quota.five_hour != null) {
+    const reset = formatResetTime(quota.five_hour_resets);
+    lines.push(`5h ${Math.round(quota.five_hour)}%${reset ? ` · resets ${reset}` : ""}`);
+  }
+  if (quota.seven_day != null) {
+    const reset = formatResetTime(quota.seven_day_resets);
+    lines.push(`7d ${Math.round(quota.seven_day)}%${reset ? ` · resets ${reset}` : ""}`);
+  }
+  return lines;
+}
+
+async function openUsage(seatId, seatName, guestName) {
+  $("usageTitle").textContent = `${guestName || "guest"} · ${seatName || "seat"}`;
+  $("usageBody").innerHTML = `<p class="quiet">Loading…</p>`;
+  openModal("usageModal");
+  try {
+    const data = await api(`/api/seats/${seatId}/usage`);
+    renderUsage(data);
+  } catch (err) {
+    $("usageBody").innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderUsage(data) {
+  const quota = data.quota || {};
+  const stats = data.stats || { daily: [], hourly: [] };
+  const badges = [];
+  if (quota.five_hour != null) {
+    const reset = formatResetTime(quota.five_hour_resets);
+    badges.push(
+      `<div class="usage-badge"><strong>${Math.round(quota.five_hour)}%</strong><span>5h session${reset ? ` · resets ${escapeHtml(reset)}` : ""}</span></div>`
+    );
+  }
+  if (quota.seven_day != null) {
+    const reset = formatResetTime(quota.seven_day_resets);
+    badges.push(
+      `<div class="usage-badge"><strong>${Math.round(quota.seven_day)}%</strong><span>7 day${reset ? ` · resets ${escapeHtml(reset)}` : ""}</span></div>`
+    );
+  }
+  const hourlyRows =
+    (stats.hourly || [])
+      .slice(0, 24)
+      .map(
+        (h) =>
+          `<tr><td>${escapeHtml(formatHourLabel(h.hour))}</td><td>${h.messages}</td><td>${h.total_tokens.toLocaleString()}</td></tr>`
+      )
+      .join("") || `<tr><td colspan="3" class="quiet">No usage recorded yet.</td></tr>`;
+  const dailyRows =
+    (stats.daily || [])
+      .map((d) => `<tr><td>${escapeHtml(d.date)}</td><td>${d.messages}</td><td>${d.total_tokens.toLocaleString()}</td></tr>`)
+      .join("") || `<tr><td colspan="3" class="quiet">No usage recorded yet.</td></tr>`;
+  $("usageBody").innerHTML = `
+    <div class="usage-badges">${badges.join("") || `<p class="quiet">No rate-limit data yet.</p>`}</div>
+    <h3>By hour</h3>
+    <table class="usage-table"><thead><tr><th>Hour</th><th>Msgs</th><th>Tokens</th></tr></thead><tbody>${hourlyRows}</tbody></table>
+    <h3>By day</h3>
+    <table class="usage-table"><thead><tr><th>Date</th><th>Msgs</th><th>Tokens</th></tr></thead><tbody>${dailyRows}</tbody></table>
+  `;
 }
 
 // Solutions are individual tasks, but a project is the unit that deploys and
@@ -455,13 +531,17 @@ async function refresh() {
       const snap = liveBySeat[s.id] || {};
       const limited = (snap.accounts || claude).some((a) => a.in_use && a.limited);
       const account = snap.account || "";
-      const quota = quotaLabel(snap.quota);
+      const lines = quotaLines(snap.quota);
       const handoff = sess && (snap.handoff || snap.handoff_text);
-      const sub = sess
-        ? `${escapeHtml(sess.coder_name)}${account ? ` · ${escapeHtml(account)}` : ""}${quota ? ` · ${escapeHtml(quota)}` : ""}`
-        : "Ready";
+      const sub = sess ? `${escapeHtml(sess.coder_name)}${account ? ` · ${escapeHtml(account)}` : ""}` : "Ready";
+      const usageChip =
+        sess && lines.length
+          ? `<button type="button" class="usage-chip" data-usage="${s.id}" data-seat-name="${escapeHtml(s.name)}" data-guest="${escapeHtml(sess.coder_name)}">${lines
+              .map((l) => `<span>${escapeHtml(l)}</span>`)
+              .join("")}</button>`
+          : "";
       return `<article class="seat ${sess ? "occupied" : ""} ${limited ? "limited" : ""}">
-        <div><strong>${escapeHtml(s.name)}</strong><span class="quiet">${sub}</span></div>
+        <div><strong>${escapeHtml(s.name)}</strong><span class="quiet">${sub}</span>${usageChip}</div>
         <div class="seat-actions">
           ${handoff ? `<button type="button" class="text" data-handoff="${escapeHtml(sess.id)}">Handoff</button>` : ""}
           ${sess ? `<button type="button" data-free="${s.id}">End</button>` : ""}
@@ -469,6 +549,10 @@ async function refresh() {
       </article>`;
     })
     .join("");
+  document.querySelectorAll("[data-usage]").forEach((btn) => {
+    btn.onclick = () =>
+      openUsage(btn.getAttribute("data-usage"), btn.getAttribute("data-seat-name"), btn.getAttribute("data-guest"));
+  });
   document.querySelectorAll("[data-handoff]").forEach((btn) => {
     btn.onclick = async () => {
       const sid = btn.getAttribute("data-handoff");
@@ -530,6 +614,11 @@ $("openSit").onclick = () => {
 $("closeSit").onclick = () => closeModal("sitModal");
 $("sitModal").addEventListener("click", (ev) => {
   if (ev.target.id === "sitModal") closeModal("sitModal");
+});
+
+$("closeUsage").onclick = () => closeModal("usageModal");
+$("usageModal").addEventListener("click", (ev) => {
+  if (ev.target.id === "usageModal") closeModal("usageModal");
 });
 
 $("openAdd").onclick = () => openModal("addDrawer");
