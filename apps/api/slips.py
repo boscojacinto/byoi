@@ -157,13 +157,13 @@ def compose_checkin_slip(
     qr_img, _ = render_qr(join)
 
     header = render_text(
-        f"{salon}\n{seat_name}\n{coder_name}",
+        f"{salon}\n{coder_name}\nSeat · {seat_name}",
         font_size=32,
         margin=12,
     )
     parsed = urlparse(join)
     hostport = parsed.netloc or join
-    body_lines = [board_title or "(pick a brief at the seat)"]
+    body_lines = [f"Project · {board_title}" if board_title else "Project · not picked yet"]
     if wifi_ssid:
         # Only true when the seat is a PC in this room. A cloud seat is reached
         # over whatever network the phone already has, and telling a guest to
