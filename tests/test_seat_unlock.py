@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -144,7 +146,62 @@ def test_control_usage_reports_guest_and_quota(tmp_path):
     assert body["quota"]["seven_day_resets"] == 1900500000
     assert body["stats"]["daily"] == []
     assert body["stats"]["hourly"] == []
+    assert body["guest_stats"] is None
     assert body["seat_id"]
+
+
+def test_control_usage_label_reports_another_seats_account(tmp_path):
+    """One seat process can serve several named chairs in `static` mode — a
+    `label` not matching the live account must report on that account's own
+    history, with no quota/guest_name (those only make sense for the live one)."""
+    import os
+
+    control = TestClient(control_app)
+    control.post(
+        "/local/admit",
+        json={"otp": "deadbeef", "session_id": "abc", "coder_name": "Ada"},
+        headers=HOST,
+    )
+    from apps.seat.claude_chat import session as chat_session
+
+    chat_session.config_dir = tmp_path / "live"
+    chat_session.quota = {"five_hour": 82}
+
+    accounts_dir = Path(os.environ["BYOI_CLAUDE_ACCOUNTS_DIR"])
+    other = accounts_dir / "claude-seat-2"
+    other.mkdir(parents=True)
+    (other / ".credentials.json").write_text("{}", encoding="utf-8")
+
+    res = control.get("/local/usage", params={"label": "claude-seat-2"}, headers=HOST)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["account"] == "claude-seat-2"
+    assert body["quota"] is None
+    assert body["guest_name"] is None
+    assert body["stats"]["daily"] == []
+
+
+def test_control_usage_unresolvable_label_never_leaks_the_live_account(tmp_path):
+    """A named chair whose account dir doesn't exist must report empty — not
+    silently fall back to whichever account happens to be live right now."""
+    control = TestClient(control_app)
+    control.post(
+        "/local/admit",
+        json={"otp": "deadbeef", "session_id": "abc", "coder_name": "Ada"},
+        headers=HOST,
+    )
+    from apps.seat.claude_chat import session as chat_session
+
+    chat_session.config_dir = tmp_path / "live"
+    chat_session.quota = {"five_hour": 82}
+
+    res = control.get("/local/usage", params={"label": "claude-seat-9"}, headers=HOST)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["account"] == "claude-seat-9"
+    assert body["quota"] is None
+    assert body["guest_name"] is None
+    assert body["stats"]["daily"] == []
 
 
 def test_handoff_requires_ticket_then_404():

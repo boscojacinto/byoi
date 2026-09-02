@@ -396,6 +396,190 @@ function quotaLines(quota) {
   return lines;
 }
 
+const CHART_PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"];
+const CHART_OTHER = "#5c675f";
+let usageGroupBy = "seat";
+
+function formatTokenShort(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function localDateStr(d) {
+  // The server buckets by local date (datetime.astimezone()); toISOString()
+  // converts to UTC first, which rolls the date back a day anywhere east of
+  // UTC (e.g. local midnight in IST is still "yesterday" in UTC) — build the
+  // string from local getters instead so the two sides always agree.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function dateRange(days) {
+  const out = [];
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  for (let i = days - 1; i >= 0; i--) {
+    const dt = new Date(d);
+    dt.setDate(dt.getDate() - i);
+    out.push(localDateStr(dt));
+  }
+  return out;
+}
+
+function formatAxisDate(iso) {
+  const d = new Date(`${iso}T00:00:00`);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+async function refreshUsageChart() {
+  const wrap = $("usageChart");
+  if (!wrap) return;
+  try {
+    const data = await api(`/api/usage/timeseries?group_by=${usageGroupBy}`);
+    renderUsageChart(data.series || [], data.days || 14);
+  } catch (err) {
+    wrap.innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderUsageChart(rawSeries, days) {
+  const wrap = $("usageChart");
+  const dates = dateRange(days);
+  if (!rawSeries.length) {
+    wrap.innerHTML = `<p class="quiet">No ${usageGroupBy === "guest" ? "guest" : "seat"} usage recorded in the last ${days} days.</p>`;
+    return;
+  }
+  // A 7th+ series folds into "Other" rather than generating a new hue.
+  const ranked = rawSeries
+    .map((s) => ({ ...s, total: s.points.reduce((a, p) => a + p.total_tokens, 0) }))
+    .sort((a, b) => b.total - a.total);
+  const shown = ranked.slice(0, 6);
+  const rest = ranked.slice(6);
+
+  const seriesForDates = (s) => {
+    const byDate = Object.fromEntries(s.points.map((p) => [p.date, p.total_tokens]));
+    return dates.map((d) => byDate[d] || 0);
+  };
+  const lines = shown.map((s, i) => ({ key: s.key, color: CHART_PALETTE[i], values: seriesForDates(s) }));
+  if (rest.length) {
+    const merged = dates.map((_, idx) => rest.reduce((sum, s) => sum + seriesForDates(s)[idx], 0));
+    lines.push({ key: "Other", color: CHART_OTHER, values: merged });
+  }
+
+  const W = 600,
+    H = 190,
+    padL = 40,
+    padR = 10,
+    padT = 10,
+    padB = 20;
+  const innerW = W - padL - padR,
+    innerH = H - padT - padB;
+  const maxY = Math.max(1, ...lines.flatMap((l) => l.values));
+  const x = (i) => padL + (dates.length > 1 ? (i / (dates.length - 1)) * innerW : innerW / 2);
+  const y = (v) => padT + innerH - (v / maxY) * innerH;
+
+  const gridY = [0, 0.5, 1]
+    .map((t) => {
+      const val = maxY * t;
+      return `<line x1="${padL}" y1="${y(val)}" x2="${W - padR}" y2="${y(val)}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+      <text x="${padL - 6}" y="${y(val) + 3}" text-anchor="end" font-size="8" fill="#7d9788">${formatTokenShort(val)}</text>`;
+    })
+    .join("");
+
+  const xTicks = [...new Set([0, Math.floor((dates.length - 1) / 2), dates.length - 1])]
+    .map(
+      (i) =>
+        `<text x="${x(i)}" y="${H - 4}" text-anchor="middle" font-size="8" fill="#7d9788">${escapeHtml(formatAxisDate(dates[i]))}</text>`
+    )
+    .join("");
+
+  const paths = lines
+    .map((l) => {
+      const pts = l.values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+      return `<polyline fill="none" stroke="${l.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`;
+    })
+    .join("");
+
+  const legend = lines
+    .map((l) => `<span class="usage-legend-item"><i style="background:${l.color}"></i>${escapeHtml(l.key)}</span>`)
+    .join("");
+
+  const tableRows = dates
+    .map(
+      (d, i) =>
+        `<tr><td>${escapeHtml(formatAxisDate(d))}</td>${lines.map((l) => `<td>${l.values[i].toLocaleString()}</td>`).join("")}</tr>`
+    )
+    .join("");
+
+  wrap.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" class="usage-svg" preserveAspectRatio="none">
+      ${gridY}
+      ${paths}
+      ${xTicks}
+      <rect class="usage-hover-rect" x="${padL}" y="${padT}" width="${innerW}" height="${innerH}" fill="transparent"/>
+    </svg>
+    <div class="usage-legend">${legend}</div>
+    <div class="usage-tooltip" hidden></div>
+    <details class="usage-table-toggle">
+      <summary>Show as table</summary>
+      <div class="usage-table-scroll">
+        <table class="usage-table"><thead><tr><th>Date</th>${lines.map((l) => `<th>${escapeHtml(l.key)}</th>`).join("")}</tr></thead><tbody>${tableRows}</tbody></table>
+      </div>
+    </details>
+  `;
+
+  wireUsageHover(wrap, dates, lines, { W, H, padL, padT, innerW, innerH });
+}
+
+function wireUsageHover(wrap, dates, lines, geo) {
+  const svg = wrap.querySelector("svg");
+  const rect = wrap.querySelector(".usage-hover-rect");
+  const tooltip = wrap.querySelector(".usage-tooltip");
+  if (!svg || !rect || !tooltip) return;
+  let crosshair = null;
+
+  const move = (ev) => {
+    const box = svg.getBoundingClientRect();
+    const scaleX = geo.W / box.width;
+    const px = (ev.clientX - box.left) * scaleX;
+    const rel = Math.min(1, Math.max(0, (px - geo.padL) / geo.innerW));
+    const idx = dates.length > 1 ? Math.round(rel * (dates.length - 1)) : 0;
+    if (!crosshair) {
+      crosshair = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      crosshair.setAttribute("class", "usage-crosshair");
+      crosshair.setAttribute("y1", String(geo.padT));
+      crosshair.setAttribute("y2", String(geo.padT + geo.innerH));
+      svg.appendChild(crosshair);
+    }
+    const cx = geo.padL + (dates.length > 1 ? (idx / (dates.length - 1)) * geo.innerW : geo.innerW / 2);
+    crosshair.setAttribute("x1", String(cx));
+    crosshair.setAttribute("x2", String(cx));
+    tooltip.hidden = false;
+    tooltip.innerHTML =
+      `<strong>${escapeHtml(formatAxisDate(dates[idx]))}</strong>` +
+      lines
+        .map(
+          (l) =>
+            `<span><i style="background:${l.color}"></i>${escapeHtml(l.key)} — ${l.values[idx].toLocaleString()}</span>`
+        )
+        .join("");
+    const boxRect = wrap.getBoundingClientRect();
+    const left = Math.min(boxRect.width - 170, Math.max(0, ev.clientX - boxRect.left + 10));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `4px`;
+  };
+  const leave = () => {
+    tooltip.hidden = true;
+    if (crosshair) crosshair.remove();
+    crosshair = null;
+  };
+  rect.addEventListener("mousemove", move);
+  rect.addEventListener("mouseleave", leave);
+}
+
 async function openUsage(seatId, seatName, guestName) {
   $("usageTitle").textContent = `${guestName || "guest"} · ${seatName || "seat"}`;
   $("usageBody").innerHTML = `<p class="quiet">Loading…</p>`;
@@ -408,40 +592,52 @@ async function openUsage(seatId, seatName, guestName) {
   }
 }
 
+function usageRows(entries, dateKey, formatLabel) {
+  return (
+    (entries || [])
+      .map(
+        (e) =>
+          `<tr><td>${escapeHtml(formatLabel(e[dateKey]))}</td><td>${e.messages}</td><td>${e.total_tokens.toLocaleString()}</td></tr>`
+      )
+      .join("") || `<tr><td colspan="3" class="quiet">No usage recorded yet.</td></tr>`
+  );
+}
+
 function renderUsage(data) {
   const quota = data.quota || {};
   const stats = data.stats || { daily: [], hourly: [] };
-  const badges = [];
+  const guestStats = data.guest_stats;
+  const quotaBadges = [];
   if (quota.five_hour != null) {
     const reset = formatResetTime(quota.five_hour_resets);
-    badges.push(
+    quotaBadges.push(
       `<div class="usage-badge"><strong>${Math.round(quota.five_hour)}%</strong><span>5h session${reset ? ` · resets ${escapeHtml(reset)}` : ""}</span></div>`
     );
   }
   if (quota.seven_day != null) {
     const reset = formatResetTime(quota.seven_day_resets);
-    badges.push(
+    quotaBadges.push(
       `<div class="usage-badge"><strong>${Math.round(quota.seven_day)}%</strong><span>7 day${reset ? ` · resets ${escapeHtml(reset)}` : ""}</span></div>`
     );
   }
-  const hourlyRows =
-    (stats.hourly || [])
-      .slice(0, 24)
-      .map(
-        (h) =>
-          `<tr><td>${escapeHtml(formatHourLabel(h.hour))}</td><td>${h.messages}</td><td>${h.total_tokens.toLocaleString()}</td></tr>`
-      )
-      .join("") || `<tr><td colspan="3" class="quiet">No usage recorded yet.</td></tr>`;
-  const dailyRows =
-    (stats.daily || [])
-      .map((d) => `<tr><td>${escapeHtml(d.date)}</td><td>${d.messages}</td><td>${d.total_tokens.toLocaleString()}</td></tr>`)
-      .join("") || `<tr><td colspan="3" class="quiet">No usage recorded yet.</td></tr>`;
+
+  let guestSection = "";
+  if (guestStats) {
+    const t = guestStats.totals || { total_tokens: 0, messages: 0 };
+    guestSection = `
+      <h3>This visit</h3>
+      <div class="usage-badges">
+        <div class="usage-badge"><strong>${t.total_tokens.toLocaleString()}</strong><span>tokens</span></div>
+        <div class="usage-badge"><strong>${t.messages.toLocaleString()}</strong><span>messages</span></div>
+      </div>
+      <table class="usage-table"><thead><tr><th>Hour</th><th>Msgs</th><th>Tokens</th></tr></thead><tbody>${usageRows(guestStats.hourly, "hour", formatHourLabel)}</tbody></table>`;
+  }
+
   $("usageBody").innerHTML = `
-    <div class="usage-badges">${badges.join("") || `<p class="quiet">No rate-limit data yet.</p>`}</div>
-    <h3>By hour</h3>
-    <table class="usage-table"><thead><tr><th>Hour</th><th>Msgs</th><th>Tokens</th></tr></thead><tbody>${hourlyRows}</tbody></table>
-    <h3>By day</h3>
-    <table class="usage-table"><thead><tr><th>Date</th><th>Msgs</th><th>Tokens</th></tr></thead><tbody>${dailyRows}</tbody></table>
+    ${guestSection}
+    <h3>Seat account${data.account ? ` — ${escapeHtml(data.account)}` : ""}</h3>
+    <div class="usage-badges">${quotaBadges.join("") || `<p class="quiet">No rate-limit data yet.</p>`}</div>
+    <table class="usage-table"><thead><tr><th>Date</th><th>Msgs</th><th>Tokens</th></tr></thead><tbody>${usageRows(stats.daily, "date", (d) => d)}</tbody></table>
   `;
 }
 
@@ -602,6 +798,7 @@ async function refresh() {
 
   if (lastPane === "live") await refreshLive().catch(() => {});
   if (lastPane === "qa") await refreshQAGrading().catch(() => {});
+  await refreshUsageChart().catch(() => {});
 }
 
 document.querySelectorAll("[data-pane]").forEach((btn) => {
@@ -622,6 +819,14 @@ $("sitModal").addEventListener("click", (ev) => {
 $("closeUsage").onclick = () => closeModal("usageModal");
 $("usageModal").addEventListener("click", (ev) => {
   if (ev.target.id === "usageModal") closeModal("usageModal");
+});
+
+document.querySelectorAll("[data-usage-group]").forEach((btn) => {
+  btn.onclick = () => {
+    usageGroupBy = btn.getAttribute("data-usage-group");
+    document.querySelectorAll("[data-usage-group]").forEach((b) => b.classList.toggle("is-on", b === btn));
+    refreshUsageChart().catch(() => {});
+  };
 });
 
 $("openAdd").onclick = () => openModal("addDrawer");

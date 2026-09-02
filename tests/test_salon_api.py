@@ -246,16 +246,20 @@ def test_api_live_mirrors_guest_history(tmp_path: Path, monkeypatch):
 def test_api_seat_usage_proxies_seat_and_requires_operator(tmp_path: Path, monkeypatch):
     client = _client(tmp_path)
     headers = {"Authorization": "Bearer byoi-host"}
-    monkeypatch.setattr(
-        "apps.api.seat_sync.usage_stats",
-        lambda seat: {
+    calls = []
+
+    def _stub(seat, **kw):
+        calls.append(kw)
+        return {
             "seat_id": seat["id"],
             "account": "claude-seat-1",
             "guest_name": "Ada",
             "quota": {"five_hour": 82, "five_hour_resets": 1900000000},
             "stats": {"daily": [], "hourly": [], "totals": {}, "window_days": 14},
-        },
-    )
+            "guest_stats": None,
+        }
+
+    monkeypatch.setattr("apps.api.seat_sync.usage_stats", _stub)
     assert client.get("/api/seats/seat-1/usage").status_code == 401
     assert client.get("/api/seats/no-such-seat/usage", headers=headers).status_code == 404
     res = client.get("/api/seats/seat-1/usage", headers=headers)
@@ -264,6 +268,17 @@ def test_api_seat_usage_proxies_seat_and_requires_operator(tmp_path: Path, monke
     assert body["guest_name"] == "Ada"
     assert body["quota"]["five_hour"] == 82
     assert body["stats"]["window_days"] == 14
+    # An idle seat's own account is still requested, with no visit to scope by.
+    assert calls[-1] == {"label": "claude-seat-1", "since": None}
+
+    client.post(
+        "/api/sessions/check-in",
+        json={"seat_id": "seat-2", "coder_name": "Bosco"},
+        headers=headers,
+    )
+    client.get("/api/seats/seat-2/usage", headers=headers)
+    assert calls[-1]["label"] == "claude-seat-2"
+    assert calls[-1]["since"] is not None
 
 
 def test_api_seat_usage_survives_seat_sync_error(tmp_path: Path, monkeypatch):
@@ -272,13 +287,60 @@ def test_api_seat_usage_survives_seat_sync_error(tmp_path: Path, monkeypatch):
     client = _client(tmp_path)
     headers = {"Authorization": "Bearer byoi-host"}
 
-    def _boom(seat):
+    def _boom(seat, **kw):
         raise SeatSyncError(503, "seat unreachable")
 
     monkeypatch.setattr("apps.api.seat_sync.usage_stats", _boom)
     res = client.get("/api/seats/seat-1/usage", headers=headers)
     assert res.status_code == 200
     assert res.json()["stats"] is None
+
+
+def test_usage_timeseries_by_seat_reports_one_series_per_chair(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+
+    def _stub(seat, *, label=None, since=None, until=None):
+        return {
+            "stats": {"daily": [{"date": "2026-09-01", "total_tokens": 100 if label == "claude-seat-1" else 50}]},
+            "guest_stats": None,
+        }
+
+    monkeypatch.setattr("apps.api.seat_sync.usage_stats", _stub)
+    assert client.get("/api/usage/timeseries").status_code == 401
+    res = client.get("/api/usage/timeseries", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["group_by"] == "seat"
+    by_key = {s["key"]: s["points"] for s in body["series"]}
+    assert by_key["Seat 1 — Window"] == [{"date": "2026-09-01", "total_tokens": 100}]
+    assert by_key["Seat 2 — Fern"] == [{"date": "2026-09-01", "total_tokens": 50}]
+
+
+def test_usage_timeseries_by_guest_merges_across_the_visit_window(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    client.post(
+        "/api/sessions/check-in",
+        json={"seat_id": "seat-1", "coder_name": "Ada"},
+        headers=headers,
+    )
+
+    seen = []
+
+    def _stub(seat, *, label=None, since=None, until=None):
+        seen.append((label, since, until))
+        return {"stats": {"daily": []}, "guest_stats": {"daily": [{"date": "2026-09-02", "total_tokens": 30}]}}
+
+    monkeypatch.setattr("apps.api.seat_sync.usage_stats", _stub)
+    res = client.get("/api/usage/timeseries", params={"group_by": "guest"}, headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["group_by"] == "guest"
+    assert body["series"] == [{"key": "Ada", "points": [{"date": "2026-09-02", "total_tokens": 30}]}]
+    # Called with the seat's own account and a since bound (the visit's start).
+    assert seen and seen[0][0] == "claude-seat-1"
+    assert seen[0][1] is not None
 
 
 def test_guest_result_shows_pass_fail_without_the_suite(tmp_path: Path):
