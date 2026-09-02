@@ -90,20 +90,6 @@ function fillProjectSelect(selected) {
     projects.map((p) => `<option value="${p.id}" ${p.id === current ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
 }
 
-function spark(seats) {
-  const n = seats.length || 1;
-  const occ = seats.filter((s) => s.session).length;
-  const pts = seats.map((_, i) => {
-    const x = 8 + (i / Math.max(n - 1, 1)) * 200;
-    const y = 52 - (occ / n) * 36 - Math.min(i, occ) * 4;
-    return `${x},${Math.max(10, y)}`;
-  });
-  const fill = `8,60 ${pts.join(" ")} 208,60`;
-  return `<svg class="spark" viewBox="0 0 216 64" preserveAspectRatio="none">
-    <polygon fill="rgba(61,255,138,0.16)" points="${fill}"/>
-    <polyline fill="none" stroke="#3dff8a" stroke-width="2.5" points="${pts.join(" ")}"/>
-  </svg>`;
-}
 
 function showPane(name) {
   if (!["floor", "solutions", "qa", "live"].includes(name)) name = "floor";
@@ -396,13 +382,22 @@ function quotaLines(quota) {
   return lines;
 }
 
-const CHART_PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"];
-const CHART_OTHER = "#5c675f";
+// One hue, stepped light->dark (ordinal ramp, not categorical — validated with
+// --ordinal against the panel surface #0c120e: monotone lightness, >=0.06
+// adjacent gaps, single hue). Keeps every chart in the salon's own neon green
+// rather than an unrelated rainbow; a legend + hover values carry identity
+// where hue no longer can.
+const CHART_PALETTE = ["#3dff8a", "#22c274", "#1a8f52", "#0f6339"];
+const CHART_OTHER = "#3a4a3f";
 let usageGroupBy = "seat";
 
 function formatTokenShort(n) {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function formatCount(n) {
   return String(Math.round(n));
 }
 
@@ -434,33 +429,16 @@ function formatAxisDate(iso) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-async function refreshUsageChart() {
-  const wrap = $("usageChart");
-  if (!wrap) return;
-  try {
-    const data = await api(`/api/usage/timeseries?group_by=${usageGroupBy}`);
-    renderUsageChart(data.series || [], data.days || 14);
-  } catch (err) {
-    wrap.innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
-  }
-}
-
-function renderUsageChart(rawSeries, days) {
-  const wrap = $("usageChart");
-  const dates = dateRange(days);
-  if (!rawSeries.length) {
-    wrap.innerHTML = `<p class="quiet">No ${usageGroupBy === "guest" ? "guest" : "seat"} usage recorded in the last ${days} days.</p>`;
-    return;
-  }
-  // A 7th+ series folds into "Other" rather than generating a new hue.
+function prepareBarLines(rawSeries, dates, valueKey) {
+  // A 5th+ series folds into "Other" rather than stretching the ramp further.
   const ranked = rawSeries
-    .map((s) => ({ ...s, total: s.points.reduce((a, p) => a + p.total_tokens, 0) }))
+    .map((s) => ({ ...s, total: s.points.reduce((a, p) => a + p[valueKey], 0) }))
     .sort((a, b) => b.total - a.total);
-  const shown = ranked.slice(0, 6);
-  const rest = ranked.slice(6);
+  const shown = ranked.slice(0, CHART_PALETTE.length);
+  const rest = ranked.slice(CHART_PALETTE.length);
 
   const seriesForDates = (s) => {
-    const byDate = Object.fromEntries(s.points.map((p) => [p.date, p.total_tokens]));
+    const byDate = Object.fromEntries(s.points.map((p) => [p.date, p[valueKey]]));
     return dates.map((d) => byDate[d] || 0);
   };
   const lines = shown.map((s, i) => ({ key: s.key, color: CHART_PALETTE[i], values: seriesForDates(s) }));
@@ -468,7 +446,10 @@ function renderUsageChart(rawSeries, days) {
     const merged = dates.map((_, idx) => rest.reduce((sum, s) => sum + seriesForDates(s)[idx], 0));
     lines.push({ key: "Other", color: CHART_OTHER, values: merged });
   }
+  return lines;
+}
 
+function renderBarChart(wrap, lines, dates, { formatValue = formatTokenShort, showLegend = true } = {}) {
   const W = 600,
     H = 190,
     padL = 40,
@@ -477,35 +458,52 @@ function renderUsageChart(rawSeries, days) {
     padB = 20;
   const innerW = W - padL - padR,
     innerH = H - padT - padB;
-  const maxY = Math.max(1, ...lines.flatMap((l) => l.values));
-  const x = (i) => padL + (dates.length > 1 ? (i / (dates.length - 1)) * innerW : innerW / 2);
-  const y = (v) => padT + innerH - (v / maxY) * innerH;
+  const totals = dates.map((_, i) => lines.reduce((sum, l) => sum + l.values[i], 0));
+  const maxY = Math.max(1, ...totals);
+  const slot = innerW / dates.length;
+  const barW = Math.max(2, slot * 0.6);
+  const xCenter = (i) => padL + slot * (i + 0.5);
+  const yTop = (v) => padT + innerH - (v / maxY) * innerH;
 
   const gridY = [0, 0.5, 1]
     .map((t) => {
       const val = maxY * t;
-      return `<line x1="${padL}" y1="${y(val)}" x2="${W - padR}" y2="${y(val)}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
-      <text x="${padL - 6}" y="${y(val) + 3}" text-anchor="end" font-size="8" fill="#7d9788">${formatTokenShort(val)}</text>`;
+      return `<line x1="${padL}" y1="${yTop(val)}" x2="${W - padR}" y2="${yTop(val)}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+      <text x="${padL - 6}" y="${yTop(val) + 3}" text-anchor="end" font-size="8" fill="#7d9788">${formatValue(val)}</text>`;
     })
     .join("");
 
   const xTicks = [...new Set([0, Math.floor((dates.length - 1) / 2), dates.length - 1])]
     .map(
       (i) =>
-        `<text x="${x(i)}" y="${H - 4}" text-anchor="middle" font-size="8" fill="#7d9788">${escapeHtml(formatAxisDate(dates[i]))}</text>`
+        `<text x="${xCenter(i)}" y="${H - 4}" text-anchor="middle" font-size="8" fill="#7d9788">${escapeHtml(formatAxisDate(dates[i]))}</text>`
     )
     .join("");
 
-  const paths = lines
-    .map((l) => {
-      const pts = l.values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
-      return `<polyline fill="none" stroke="${l.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`;
+  // Stacked per date: each series a rounded segment, baseline-anchored, with a
+  // 1px surface gap between adjacent segments (skip the gap on a lone series).
+  const bars = dates
+    .map((_, i) => {
+      const bx = xCenter(i) - barW / 2;
+      let cumulative = 0;
+      return lines
+        .map((l) => {
+          const v = l.values[i];
+          if (v <= 0) return "";
+          const gap = lines.length > 1 ? 1 : 0;
+          const segH = Math.max(0, (v / maxY) * innerH - gap);
+          const segY = padT + innerH - cumulative - (v / maxY) * innerH + gap;
+          cumulative += (v / maxY) * innerH;
+          return `<rect x="${bx}" y="${segY}" width="${barW}" height="${segH}" rx="2" fill="${l.color}"/>`;
+        })
+        .join("");
     })
     .join("");
 
-  const legend = lines
-    .map((l) => `<span class="usage-legend-item"><i style="background:${l.color}"></i>${escapeHtml(l.key)}</span>`)
-    .join("");
+  const legend =
+    showLegend && lines.length > 1
+      ? `<div class="usage-legend">${lines.map((l) => `<span class="usage-legend-item"><i style="background:${l.color}"></i>${escapeHtml(l.key)}</span>`).join("")}</div>`
+      : "";
 
   const tableRows = dates
     .map(
@@ -517,11 +515,11 @@ function renderUsageChart(rawSeries, days) {
   wrap.innerHTML = `
     <svg viewBox="0 0 ${W} ${H}" class="usage-svg" preserveAspectRatio="none">
       ${gridY}
-      ${paths}
+      ${bars}
       ${xTicks}
       <rect class="usage-hover-rect" x="${padL}" y="${padT}" width="${innerW}" height="${innerH}" fill="transparent"/>
     </svg>
-    <div class="usage-legend">${legend}</div>
+    ${legend}
     <div class="usage-tooltip" hidden></div>
     <details class="usage-table-toggle">
       <summary>Show as table</summary>
@@ -531,41 +529,43 @@ function renderUsageChart(rawSeries, days) {
     </details>
   `;
 
-  wireUsageHover(wrap, dates, lines, { W, H, padL, padT, innerW, innerH });
+  wireBarHover(wrap, dates, lines, { W, H, padL, padT, innerW, innerH, slot }, formatValue);
 }
 
-function wireUsageHover(wrap, dates, lines, geo) {
+function wireBarHover(wrap, dates, lines, geo, formatValue) {
   const svg = wrap.querySelector("svg");
   const rect = wrap.querySelector(".usage-hover-rect");
   const tooltip = wrap.querySelector(".usage-tooltip");
   if (!svg || !rect || !tooltip) return;
-  let crosshair = null;
+  let marker = null;
 
   const move = (ev) => {
     const box = svg.getBoundingClientRect();
     const scaleX = geo.W / box.width;
     const px = (ev.clientX - box.left) * scaleX;
-    const rel = Math.min(1, Math.max(0, (px - geo.padL) / geo.innerW));
-    const idx = dates.length > 1 ? Math.round(rel * (dates.length - 1)) : 0;
-    if (!crosshair) {
-      crosshair = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      crosshair.setAttribute("class", "usage-crosshair");
-      crosshair.setAttribute("y1", String(geo.padT));
-      crosshair.setAttribute("y2", String(geo.padT + geo.innerH));
-      svg.appendChild(crosshair);
+    const idx = Math.min(dates.length - 1, Math.max(0, Math.floor((px - geo.padL) / geo.slot)));
+    if (!marker) {
+      marker = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      marker.setAttribute("class", "usage-hover-band");
+      marker.setAttribute("y", String(geo.padT));
+      marker.setAttribute("height", String(geo.innerH));
+      marker.setAttribute("width", String(geo.slot));
+      svg.insertBefore(marker, svg.firstChild);
     }
-    const cx = geo.padL + (dates.length > 1 ? (idx / (dates.length - 1)) * geo.innerW : geo.innerW / 2);
-    crosshair.setAttribute("x1", String(cx));
-    crosshair.setAttribute("x2", String(cx));
+    marker.setAttribute("x", String(geo.padL + idx * geo.slot));
     tooltip.hidden = false;
-    tooltip.innerHTML =
-      `<strong>${escapeHtml(formatAxisDate(dates[idx]))}</strong>` +
-      lines
-        .map(
-          (l) =>
-            `<span><i style="background:${l.color}"></i>${escapeHtml(l.key)} — ${l.values[idx].toLocaleString()}</span>`
-        )
-        .join("");
+    const total = lines.reduce((sum, l) => sum + l.values[idx], 0);
+    const rows =
+      lines.length > 1
+        ? lines
+            .filter((l) => l.values[idx] > 0)
+            .map((l) => `<span><i style="background:${l.color}"></i>${escapeHtml(l.key)} — ${formatValue(l.values[idx])}</span>`)
+            .join("") +
+          (lines.filter((l) => l.values[idx] > 0).length > 1
+            ? `<span class="usage-tooltip-total">Total — ${formatValue(total)}</span>`
+            : "")
+        : `<span>${formatValue(total)}</span>`;
+    tooltip.innerHTML = `<strong>${escapeHtml(formatAxisDate(dates[idx]))}</strong>${rows || `<span class="quiet">No data</span>`}`;
     const boxRect = wrap.getBoundingClientRect();
     const left = Math.min(boxRect.width - 170, Math.max(0, ev.clientX - boxRect.left + 10));
     tooltip.style.left = `${left}px`;
@@ -573,11 +573,48 @@ function wireUsageHover(wrap, dates, lines, geo) {
   };
   const leave = () => {
     tooltip.hidden = true;
-    if (crosshair) crosshair.remove();
-    crosshair = null;
+    if (marker) marker.remove();
+    marker = null;
   };
   rect.addEventListener("mousemove", move);
   rect.addEventListener("mouseleave", leave);
+}
+
+async function refreshUsageChart() {
+  const wrap = $("usageChart");
+  if (!wrap) return;
+  try {
+    const data = await api(`/api/usage/timeseries?group_by=${usageGroupBy}`);
+    const days = data.days || 14;
+    const dates = dateRange(days);
+    const series = data.series || [];
+    if (!series.length) {
+      wrap.innerHTML = `<p class="quiet">No ${usageGroupBy === "guest" ? "guest" : "seat"} usage recorded in the last ${days} days.</p>`;
+      return;
+    }
+    renderBarChart(wrap, prepareBarLines(series, dates, "total_tokens"), dates, { formatValue: formatTokenShort });
+  } catch (err) {
+    wrap.innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function refreshOccupancyChart() {
+  const wrap = $("occupancyChart");
+  if (!wrap) return;
+  try {
+    const data = await api("/api/floor/occupancy");
+    const days = data.days || 14;
+    const dates = dateRange(days);
+    const points = data.points || [];
+    if (!points.length) {
+      wrap.innerHTML = `<p class="quiet">No visits recorded in the last ${days} days.</p>`;
+      return;
+    }
+    const lines = prepareBarLines([{ key: "Visits", points }], dates, "visits");
+    renderBarChart(wrap, lines, dates, { formatValue: formatCount, showLegend: false });
+  } catch (err) {
+    wrap.innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
+  }
 }
 
 async function openUsage(seatId, seatName, guestName) {
@@ -718,8 +755,7 @@ async function refresh() {
   });
   $("today").innerHTML = `
     <strong>${occ.length ? "Busy" : "Calm"}</strong>
-    <p class="quiet">${occ.length} sitting · ${open.length} open${claude.length ? ` · ${readyLogins} Claude login${readyLogins === 1 ? "" : "s"} ready` : ""}</p>
-    ${spark(seats)}`;
+    <p class="quiet">${occ.length} sitting · ${open.length} open${claude.length ? ` · ${readyLogins} Claude login${readyLogins === 1 ? "" : "s"} ready` : ""}</p>`;
 
   $("seats").innerHTML = seats
     .map((s) => {
@@ -798,6 +834,7 @@ async function refresh() {
 
   if (lastPane === "live") await refreshLive().catch(() => {});
   if (lastPane === "qa") await refreshQAGrading().catch(() => {});
+  await refreshOccupancyChart().catch(() => {});
   await refreshUsageChart().catch(() => {});
 }
 

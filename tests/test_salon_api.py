@@ -343,6 +343,27 @@ def test_usage_timeseries_by_guest_merges_across_the_visit_window(tmp_path: Path
     assert seen[0][1] is not None
 
 
+def test_floor_occupancy_counts_real_visits_not_a_live_snapshot(tmp_path: Path):
+    client = _client(tmp_path)
+    headers = {"Authorization": "Bearer byoi-host"}
+    assert client.get("/api/floor/occupancy").status_code == 401
+
+    client.post(
+        "/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}, headers=headers
+    )
+    client.post(
+        "/api/sessions/check-in", json={"seat_id": "seat-2", "coder_name": "Bosco"}, headers=headers
+    )
+    res = client.get("/api/floor/occupancy", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["days"] == 14
+    from datetime import datetime
+
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    assert body["points"] == [{"date": today, "visits": 2}]
+
+
 def test_guest_result_shows_pass_fail_without_the_suite(tmp_path: Path):
     """The phone gets every case and a reason; the desk keeps the raw report.
 
