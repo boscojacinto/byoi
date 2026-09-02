@@ -415,6 +415,20 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         return {"group_by": group_by, "days": window_days, "series": series}
 
+    @app.get("/api/floor/occupancy")
+    def floor_occupancy(request: Request, authorization: str | None = Header(default=None)) -> dict:
+        """Visits per day, for the floor's occupancy graph — real check-in
+        history, not a live-instant snapshot dressed up as a trend."""
+        require_operator(request, authorization)
+        window_days = 14
+        cutoff = time.time() - window_days * 86400
+        counts: dict[str, int] = {}
+        for sess in store.sessions_since(cutoff):
+            day = _date_str(sess["started_at"])
+            counts[day] = counts.get(day, 0) + 1
+        points = [{"date": d, "visits": n} for d, n in sorted(counts.items())]
+        return {"days": window_days, "points": points}
+
     @app.get("/api/sessions/{session_id}/handoff")
     def session_handoff(session_id: str) -> Response:
         from apps.seat.accounts import read_handoff
