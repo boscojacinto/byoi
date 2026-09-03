@@ -41,6 +41,17 @@ SUBMIT_SENTINEL = SUBMIT_MARK + " {session_id}"
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", ".pytest_cache"}
 Spawn = Callable[..., Awaitable[asyncio.subprocess.Process]]
 MODES = ("acceptEdits", "plan", "auto", "manual")
+# The guest picks from salon-friendly labels; Claude Code's CLI only
+# recognizes default/plan/acceptEdits/bypassPermissions for
+# set_permission_mode, so "auto"/"manual" sent verbatim are silently
+# rejected or ignored by a real `claude` process. "auto" (skip prompts) maps
+# to bypassPermissions and "manual" (ask every time) to the CLI's own default.
+CLI_MODE = {
+    "acceptEdits": "acceptEdits",
+    "plan": "plan",
+    "auto": "bypassPermissions",
+    "manual": "default",
+}
 
 # Claude Code writes one JSON object per line, and a line carrying a base64
 # image -- a Read of any photo in the guest's repo -- runs to hundreds of
@@ -284,6 +295,10 @@ def tool_detail(name: str, payload: Any) -> str:
             return value.strip()[:200]
     if name == "TodoWrite" and isinstance(payload.get("todos"), list):
         return f"{len(payload['todos'])} todos"
+    if name == "MultiEdit" and isinstance(payload.get("edits"), list):
+        return f"{len(payload['edits'])} edits"
+    if name == "ExitPlanMode" and isinstance(payload.get("plan"), str) and payload["plan"].strip():
+        return payload["plan"].strip()[:200]
     return name
 
 
@@ -297,6 +312,16 @@ def tool_diff(name: str, payload: Any) -> dict[str, Any] | None:
             "old": str(payload.get("old_string") or ""),
             "new": str(payload.get("new_string") or ""),
         }
+    if name == "MultiEdit" and isinstance(payload.get("edits"), list):
+        edits = [e for e in payload["edits"] if isinstance(e, dict)]
+        if not edits:
+            return None
+        # Each edit is its own old/new snippet, not a hunk of one file, so
+        # stitching them with blank lines keeps the LCS diff from bleeding
+        # unrelated edits into each other's context.
+        old = "\n\n".join(str(e.get("old_string") or "") for e in edits)
+        new = "\n\n".join(str(e.get("new_string") or "") for e in edits)
+        return {"path": path, "old": old, "new": new}
     if name == "Write":
         body = payload.get("content")
         if body is None:
@@ -344,7 +369,7 @@ def encode_mode(mode: str) -> dict[str, Any]:
     return {
         "type": "control_request",
         "request_id": str(uuid.uuid4()),
-        "request": {"subtype": "set_permission_mode", "mode": mode},
+        "request": {"subtype": "set_permission_mode", "mode": CLI_MODE[mode]},
     }
 
 
@@ -546,6 +571,11 @@ class GuestTranslator:
             return [{"type": "status", "busy": True, "label": f"Retrying… ({delay}ms)"}]
         if subtype == "status" and obj.get("status"):
             return [{"type": "status", "busy": True, "label": str(obj.get("status"))}]
+        if subtype == "compact_boundary":
+            # A guest who runs /compact otherwise gets no sign anything
+            # happened beyond whatever the model chooses to say next.
+            summary = obj.get("summary") or obj.get("compact_metadata", {}).get("summary")
+            return [{"type": "compact", "summary": str(summary) if summary else ""}]
         return []
 
     def _stream(self, obj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -717,7 +747,7 @@ class GuestTranslator:
 
 def _history_item(event: dict[str, Any]) -> dict[str, Any] | None:
     kind = event.get("type")
-    if kind in {"user", "assistant", "thinking", "tool", "ask", "todos", "permission"}:
+    if kind in {"user", "assistant", "thinking", "tool", "ask", "todos", "permission", "compact"}:
         item = dict(event)
         item.pop("delta", None)
         if kind == "assistant":
@@ -860,7 +890,21 @@ class ClaudeChat:
         async with self._lock:
             if self._proc is not None and self._proc.returncode is None:
                 return
+            # A process that existed and has now exited is a crash respawn,
+            # not the session's first start. _start() throws away the old
+            # translator/history for a fresh Claude session with no memory of
+            # the conversation, while the guest's own transcript stays right
+            # where it was — without this, the chat looks uninterrupted while
+            # Claude has actually forgotten everything said so far.
+            crashed = self._proc is not None
             await self._start()
+            if crashed:
+                await self._broadcast(
+                    {
+                        "type": "error",
+                        "message": "Claude's process restarted — it no longer remembers this conversation. Your files are unchanged.",
+                    }
+                )
 
     async def _start(self) -> None:
         self._stop_process()
@@ -942,7 +986,15 @@ class ClaudeChat:
     async def send_user(self, text: str, images: Any = None, *, silent: bool = False) -> None:
         pics = images if isinstance(images, list) else None
         if pics and len(pics) > 4:
+            dropped = len(pics) - 4
             pics = pics[:4]
+            if not silent:
+                # The client caps at 4 too, so this only fires for an older
+                # client or a bug — but silently dropping images with no
+                # explanation is worse either way.
+                await self._broadcast(
+                    {"type": "error", "message": f"Only 4 photos go with one message — {dropped} not sent."}
+                )
         text = (text or "").strip()
         if not text and not pics:
             return
@@ -1010,13 +1062,16 @@ class ClaudeChat:
         if mode not in MODES:
             await self._broadcast({"type": "error", "message": f"unknown mode {mode}"})
             return
+        if self._proc is None or self._proc.stdin is None:
+            await self._broadcast({"type": "error", "message": "not connected yet"})
+            return
+        # Every mode, plan included, goes over the control channel with a
+        # real CLI mode name (see CLI_MODE) — plan used to be entered by
+        # sending the literal chat text "/plan", which is not a Claude Code
+        # slash command and never actually changed the running mode.
+        await self._write(encode_mode(mode))
         self.translator.mode = mode
         await self._broadcast({"type": "mode", "mode": mode})
-        if mode == "plan":
-            await self.send_user("/plan")
-            return
-        if self._proc is not None and self._proc.stdin is not None:
-            await self._write(encode_mode(mode))
 
     async def answer_permission(self, request_id: str, allow: bool) -> None:
         if self._proc is None or self._proc.stdin is None or not request_id:
