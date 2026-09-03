@@ -28,6 +28,7 @@ from apps.secrets import read_secret
 
 from . import caddy
 from . import deploy as deploy_ops
+from . import github_issues
 from . import guest_report
 from . import infra as desk_infra
 from . import operator
@@ -123,6 +124,40 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     data = Path(data_dir or os.environ.get("BYOI_DATA", ROOT / "data"))
     store = Store(data / "salon.db")
     _relay: dict[str, float] = {}
+    _issue_sync_at: dict[str, float] = {}
+    ISSUE_SYNC_TTL = 60.0
+
+    def sync_project_issues(project_id: str, *, force: bool = False) -> dict | None:
+        """Merge a github project's open issues onto its board rows.
+
+        None means "not a GitHub project" (nothing to do) or "synced too
+        recently, skipped" — both are fine to ignore. Raises on a real fetch
+        failure so a manual sync can surface it to the host.
+        """
+        project = store.project(project_id)
+        if not project:
+            raise KeyError("unknown project")
+        slug = project_ops.github_repo_slug(project.get("github"))
+        if not slug:
+            return None
+        if not force and time.time() - _issue_sync_at.get(project_id, 0.0) < ISSUE_SYNC_TTL:
+            return None
+        issues = github_issues.fetch_open_issues(slug)
+        result = store.sync_board_issues(project_id, issues)
+        _issue_sync_at[project_id] = time.time()
+        return result
+
+    def sync_all_github_projects() -> None:
+        """Best-effort refresh before the board is read — a `gh` failure (not
+        installed, not authenticated, repo gone private) must never break
+        Solutions for everyone else, so it's swallowed here and only surfaced
+        through the explicit sync endpoint."""
+        for project in store.projects():
+            try:
+                sync_project_issues(project["id"])
+            except (KeyError, github_issues.GithubIssuesError) as exc:
+                log.warning("BYOI: could not sync issues for project %s: %s", project["id"], exc)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if on_demand_seats():
@@ -207,6 +242,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.get("/api/board")
     def get_board() -> dict:
+        sync_all_github_projects()
         return {"items": store.board()}
 
     @app.post("/api/board")
@@ -257,13 +293,34 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(502, str(exc)) from exc
         local_path = made["local_path"] or ""
         framework = made.get("framework") or (project_ops.detect(local_path).get("framework") if local_path else None)
-        return store.add_project(
+        created = store.add_project(
             name=made["name"] or "project",
             local_path=local_path,
             github=made.get("github"),
             framework=framework,
             template=made.get("template"),
         )
+        if project_ops.is_github_project(created):
+            try:
+                sync_project_issues(created["id"], force=True)
+            except github_issues.GithubIssuesError as exc:
+                log.warning("BYOI: could not sync issues for new project %s: %s", created["id"], exc)
+        return created
+
+    @app.post("/api/projects/{project_id}/sync-issues")
+    def sync_issues_route(
+        request: Request, project_id: str, authorization: str | None = Header(default=None)
+    ) -> dict:
+        require_operator(request, authorization)
+        try:
+            result = sync_project_issues(project_id, force=True)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except github_issues.GithubIssuesError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        if result is None:
+            raise HTTPException(400, "this project's origin is not a GitHub repo")
+        return {"project_id": project_id, **result}
 
     @app.get("/api/templates")
     def get_templates() -> dict:
@@ -1039,6 +1096,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         agent = (
             public_base(seat["agent_url"], public_host=seat.get("public_host")) if seat else None
         )
+        sync_all_github_projects()
         return {
             "session": sess,
             "seat": seat,

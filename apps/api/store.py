@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS board (
     created_at REAL NOT NULL,
     project_id TEXT,
     spec TEXT NOT NULL DEFAULT '',
+    -- Set when this brief was synced from a GitHub issue, so a later sync can
+    -- find and update it instead of importing it twice, and so a closed issue
+    -- can be told apart from a brief the host wrote by hand.
+    github_issue_number INTEGER,
+    github_issue_url TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -136,6 +141,11 @@ class Store:
             self.conn.execute("ALTER TABLE board ADD COLUMN project_id TEXT")
         if "spec" not in self._columns("board"):
             self.conn.execute("ALTER TABLE board ADD COLUMN spec TEXT NOT NULL DEFAULT ''")
+        board_cols = self._columns("board")
+        if "github_issue_number" not in board_cols:
+            self.conn.execute("ALTER TABLE board ADD COLUMN github_issue_number INTEGER")
+        if "github_issue_url" not in board_cols:
+            self.conn.execute("ALTER TABLE board ADD COLUMN github_issue_url TEXT")
         proj_cols = self._columns("projects")
         if "framework" not in proj_cols:
             self.conn.execute("ALTER TABLE projects ADD COLUMN framework TEXT")
@@ -466,6 +476,83 @@ class Store:
         self.conn.execute("UPDATE board SET project_id=? WHERE id=?", (project_id, board_id))
         self.conn.commit()
         return self.board_item(board_id)  # type: ignore[return-value]
+
+    #: Applied to a brief imported from a GitHub issue — the issue itself has
+    #: no notion of wellness minutes or break cadence, so it gets the same
+    #: defaults a host would get leaving the "New solution" form untouched.
+    ISSUE_WELLNESS_MINUTES = 90
+    ISSUE_BREAK_AFTER = 50
+
+    def sync_board_issues(self, project_id: str, issues: list[dict[str, Any]]) -> dict[str, int]:
+        """Merge a project's open GitHub issues into its board rows.
+
+        Each issue upserts by ``github_issue_number`` — title/brief/url refresh
+        from GitHub every sync, but a host's wellness_minutes/break_after/spec
+        edits on that row are left alone. A previously-imported row whose issue
+        is no longer in the open set (closed, or the issue itself deleted) is
+        dropped, unless a session already claimed it — then it's unpublished
+        instead, the same way a retired seed brief is, so history stays intact.
+        """
+        if not self.project(project_id):
+            raise KeyError("unknown project")
+        existing = {
+            row["github_issue_number"]: row["id"]
+            for row in self.conn.execute(
+                "SELECT id, github_issue_number FROM board "
+                "WHERE project_id=? AND github_issue_number IS NOT NULL",
+                (project_id,),
+            ).fetchall()
+        }
+        open_numbers: set[int] = set()
+        added = updated = 0
+        now = time.time()
+        for issue in issues:
+            number = issue.get("number")
+            if number is None:
+                continue
+            open_numbers.add(number)
+            title = (issue.get("title") or f"Issue #{number}").strip()
+            brief = (issue.get("body") or "").strip() or title
+            url = issue.get("url") or ""
+            if number in existing:
+                self.conn.execute(
+                    "UPDATE board SET title=?, brief=?, github_issue_url=? WHERE id=?",
+                    (title, brief, url, existing[number]),
+                )
+                updated += 1
+            else:
+                item_id = str(uuid.uuid4())[:8]
+                self.conn.execute(
+                    "INSERT INTO board (id, title, brief, wellness_minutes, break_after, "
+                    "published, created_at, project_id, spec, github_issue_number, github_issue_url) "
+                    "VALUES (?,?,?,?,?,1,?,?,?,?,?)",
+                    (
+                        item_id,
+                        title,
+                        brief,
+                        self.ISSUE_WELLNESS_MINUTES,
+                        self.ISSUE_BREAK_AFTER,
+                        now,
+                        project_id,
+                        "",
+                        number,
+                        url,
+                    ),
+                )
+                added += 1
+        stale = [bid for number, bid in existing.items() if number not in open_numbers]
+        removed = 0
+        for bid in stale:
+            used = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE board_id=? LIMIT 1", (bid,)
+            ).fetchone()
+            if used:
+                self.conn.execute("UPDATE board SET published=0 WHERE id=?", (bid,))
+            else:
+                self.conn.execute("DELETE FROM board WHERE id=?", (bid,))
+            removed += 1
+        self.conn.commit()
+        return {"added": added, "updated": updated, "removed": removed}
 
     def set_board_spec(self, board_id: str, spec: str) -> dict[str, Any]:
         item = self.board_item(board_id)

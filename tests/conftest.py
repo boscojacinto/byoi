@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from apps.api import seed_board
+from apps.api import github_issues, seed_board
 from apps.api.seat_sync import SeatSyncError
 from apps.seat.claude_chat import session as chat_session
 from apps.seat.gate import gate
@@ -86,6 +86,22 @@ def _projects_in_tmp(tmp_path_factory, monkeypatch):
     root = tmp_path_factory.mktemp("projects")
     monkeypatch.setenv("BYOI_PROJECTS_DIR", str(root))
     (root / seed_board.SEED_PROJECT["slug"]).mkdir()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gh_issues(monkeypatch):
+    """No test may reach the real `gh` CLI to list issues.
+
+    The seed project (and most test projects) carry a github.com remote, so
+    every `/api/board` call auto-syncs it — without this, that means a real
+    `gh issue list` subprocess call, real auth, and real network on every
+    test that touches the board. Tests exercising sync behavior on purpose
+    monkeypatch this back to something fake.
+    """
+    def _blocked(repo_slug, *, limit=100):
+        raise github_issues.GithubIssuesError("gh issue list stubbed off in tests")
+
+    monkeypatch.setattr("apps.api.github_issues.fetch_open_issues", _blocked)
 
 
 @pytest.fixture(autouse=True)
