@@ -24,10 +24,13 @@ const SLASH = [
   { cmd: "/pr", hint: "Open a pull request" },
 ];
 
+// ids here are the salon's own labels, translated to Claude Code's real
+// permission-mode names server-side (CLI_MODE in apps/seat/claude_chat.py)
+// before ever reaching the `claude` process.
 const MODES = [
   { id: "plan", label: "Plan", hint: "Design before touching files" },
   { id: "acceptEdits", label: "Code", hint: "Auto-accept file edits" },
-  { id: "auto", label: "Auto", hint: "Classifier reviews risky tools" },
+  { id: "auto", label: "Auto", hint: "Skip prompts for every tool" },
   { id: "manual", label: "Ask", hint: "Prompt you for every tool" },
 ];
 
@@ -46,6 +49,7 @@ const state = {
   chatBusy: false,
   chatLabel: "Ready",
   ws: null,
+  reconnectAttempts: 0,
   model: "",
   mode: "acceptEdits",
   cwd: "",
@@ -59,6 +63,7 @@ const state = {
   // keyed "g:"/"t:"/"k:" + id. Absent means "use the default for that row".
   expanded: {},
   sheet: null,
+  slashFilter: "",
   installable: false,
   floorTab: "session",
   // Which project's task list is expanded on the Solutions tab.
@@ -206,6 +211,39 @@ function codeBlockHTML(chunk) {
   </div>`;
 }
 
+// A GFM pipe row: at least one "|", trimmed of the optional leading/trailing
+// pipe before splitting on the ones that separate cells.
+function splitTableRow(text) {
+  const trimmed = text.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+const TABLE_RULE = /^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?$/;
+
+function tableHTML(headerLine, ruleLine, bodyLines) {
+  const headers = splitTableRow(headerLine);
+  const aligns = splitTableRow(ruleLine).map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    if (left) return "left";
+    return "";
+  });
+  const th = headers
+    .map((cell, i) => `<th${aligns[i] ? ` style="text-align:${aligns[i]}"` : ""}>${inlineMarkdown(cell)}</th>`)
+    .join("");
+  const rows = bodyLines
+    .map((line) => {
+      const cells = splitTableRow(line)
+        .map((cell, i) => `<td${aligns[i] ? ` style="text-align:${aligns[i]}"` : ""}>${inlineMarkdown(cell)}</td>`)
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+  return `<div class="md-table-wrap"><table class="md-table"><thead><tr>${th}</tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 function renderProse(raw) {
   const out = [];
   let list = null;
@@ -218,11 +256,27 @@ function renderProse(raw) {
     if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${i}</li>`).join("")}</${list.tag}>`);
     list = null;
   };
-  for (const line of String(raw || "").split("\n")) {
-    const text = line.trim();
+  const lines = String(raw || "").split("\n");
+  for (let idx = 0; idx < lines.length; idx++) {
+    const text = lines[idx].trim();
     if (!text) {
       flushPara();
       flushList();
+      continue;
+    }
+    // A table's header and rule line come as a pair — check ahead before
+    // treating the header as an ordinary paragraph line.
+    if (text.includes("|") && idx + 1 < lines.length && TABLE_RULE.test(lines[idx + 1].trim())) {
+      flushPara();
+      flushList();
+      const body = [];
+      let j = idx + 2;
+      while (j < lines.length && lines[j].trim() && lines[j].trim().includes("|")) {
+        body.push(lines[j].trim());
+        j++;
+      }
+      out.push(tableHTML(text, lines[idx + 1].trim(), body));
+      idx = j - 1;
       continue;
     }
     const heading = text.match(/^(#{1,4})\s+(.*)$/);
@@ -362,6 +416,7 @@ async function openChat() {
       body: JSON.stringify({ otp: state.otp, session_id: state.join?.session?.id }),
     });
     state.ticket = data.ticket || "";
+    state.reconnectAttempts = 0;
     saveStore({ ticket: state.ticket, view: "chat" });
     state.view = "chat";
     state.status = "";
@@ -417,14 +472,54 @@ function chatUrl(ticket) {
   return `${proto}://${location.host}/chat?ticket=${encodeURIComponent(ticket)}`;
 }
 
-function connectChat() {
+// A ticket the seat no longer recognizes — most commonly because the seat
+// process itself restarted, which wipes its in-memory ticket — can never be
+// fixed by retrying the same value, only by presenting the OTP again.
+async function reauthTicket() {
+  if (!state.otp) return false;
+  try {
+    const data = await api("/local/unlock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ otp: state.otp, session_id: state.join?.session?.id }),
+    });
+    if (!data.ticket) return false;
+    state.ticket = data.ticket;
+    saveStore({ ticket: state.ticket, view: "chat" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Retries this many times on the ticket already in hand before assuming it
+// is stale rather than the connection just being slow to come back.
+const RECONNECT_REAUTH_AFTER = 4;
+
+async function connectChat() {
   if (!state.ticket) return;
   state.leaveChat = false;
   if (state.ws && (state.ws.readyState === 0 || state.ws.readyState === 1)) return;
+  if ((state.reconnectAttempts || 0) > RECONNECT_REAUTH_AFTER) {
+    const ok = await reauthTicket();
+    if (state.leaveChat || state.view !== "chat") return;
+    if (!ok) {
+      // Retrying forever on a ticket that will never work again left the
+      // guest staring at "Reconnecting…" with no explanation and nothing to
+      // do. Say plainly that it needs a rejoin, but keep trying quietly in
+      // the background in case the seat comes back on its own.
+      state.chatLabel = "Can't reconnect — go back and rejoin from the slip";
+      renderChatChrome();
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = setTimeout(connectChat, 8000);
+      return;
+    }
+  }
   const ws = new WebSocket(chatUrl(state.ticket));
   state.ws = ws;
   ws.onopen = () => {
     state.reconnectDelay = 800;
+    state.reconnectAttempts = 0;
   };
   ws.onmessage = (ev) => {
     let msg;
@@ -438,6 +533,7 @@ function connectChat() {
   ws.onclose = () => {
     if (state.ws === ws) state.ws = null;
     if (state.view !== "chat" || state.leaveChat) return;
+    state.reconnectAttempts = (state.reconnectAttempts || 0) + 1;
     state.chatLabel = "Reconnecting…";
     state.chatBusy = false;
     renderChatChrome();
@@ -489,6 +585,14 @@ function applyChatEvent(msg) {
     state.handoffAvailable = !!msg.handoff || state.handoffAvailable;
     state.chatBusy = false;
     state.chatLabel = labelReady();
+    render();
+    return;
+  }
+  if (kind === "compact") {
+    // Real Claude Code's own compact_boundary event, distinct from the
+    // account-failover "account" notice above — without a card here a
+    // guest who runs /compact sees no confirmation anything happened.
+    upsert({ id: uid(), kind: "compact", summary: msg.summary || "" });
     render();
     return;
   }
@@ -579,6 +683,10 @@ function applyChatEvent(msg) {
     if (msg.name !== undefined) item.name = msg.name;
     if (msg.detail !== undefined) item.detail = msg.detail;
     if (msg.diff !== undefined) item.diff = msg.diff;
+    // Missing before: the full tool input (e.g. ExitPlanMode's `plan` text)
+    // was already in the event but never kept, so any card that needed more
+    // than `detail`'s single field had nothing to read.
+    if (msg.input !== undefined) item.input = msg.input;
     if (msg.resolved !== undefined) item.resolved = msg.resolved;
     upsert(item);
     render();
@@ -606,9 +714,28 @@ function quotaBits() {
   return bits;
 }
 
+const MODEL_FAMILIES = ["opus", "sonnet", "haiku"];
+
+// "claude-sonnet-4-5-20250929" -> "sonnet 4.5". Real ids carry a trailing
+// 8-digit date stamp and (sometimes) a leading "claude-" that a naive
+// last-two-segments cut chops the family name off of, leaving a bare
+// version+date string with no indication of which model that even is.
+function shortModelLabel(model) {
+  const raw = String(model || "").trim();
+  if (!raw) return "";
+  let parts = raw.split("-").filter(Boolean);
+  if (parts[0] === "claude") parts = parts.slice(1);
+  if (parts.length > 1 && /^\d{8}$/.test(parts[parts.length - 1])) parts = parts.slice(0, -1);
+  const familyIdx = parts.findIndex((p) => MODEL_FAMILIES.includes(p.toLowerCase()));
+  if (familyIdx === -1) return parts.join(" ") || raw;
+  const family = parts[familyIdx];
+  const version = parts.filter((p, i) => i !== familyIdx && /^\d+$/.test(p));
+  return version.length ? `${family} ${version.join(".")}` : family;
+}
+
 function labelReady() {
   const bits = [state.mode === "plan" ? "plan" : "code"];
-  if (state.model) bits.push(String(state.model).split("-").slice(-2).join(" "));
+  if (state.model) bits.push(shortModelLabel(state.model));
   if (state.account) bits.push(state.account);
   bits.push(...quotaBits());
   if (state.usage?.cost != null) bits.push(`$${Number(state.usage.cost).toFixed(3)}`);
@@ -777,6 +904,13 @@ function handleLocalSlash(trimmed) {
     downloadHandoff(trimmed);
     return true;
   }
+  if (cmd === "/plan") {
+    // Not a real Claude Code slash command — sending it as chat text used to
+    // just say "/plan" to the model. Switching mode is what plan mode
+    // actually is, and the sheet's own Plan item already does this.
+    wsSend({ type: "mode", mode: "plan" });
+    return true;
+  }
   return false;
 }
 
@@ -846,6 +980,12 @@ function sendUser(text, images) {
 
 function runSlash(entry) {
   state.sheet = null;
+  state.slashFilter = "";
+  const draft = $("#draft");
+  if (draft) {
+    draft.value = "";
+    draft.style.height = "auto";
+  }
   if (entry.cmd === "/plan") {
     wsSend({ type: "mode", mode: "plan" });
     render();
@@ -971,7 +1111,20 @@ function toolInfo(msg) {
     if (verb === "resize") return make("web", "Resized the window", "Resizing the window", "");
     return make("web", "Used the browser", "Using the browser", verb.replace(/_/g, " "));
   }
-  return make("tool", name, name, detail);
+  // Any other tool — an MCP server besides the seat's own browser, or a
+  // custom one this file doesn't know about yet — gets a readable label
+  // instead of its raw wire name, and never repeats that name as both the
+  // verb and the subject the way the bare fallback used to.
+  const { server, tool } = humanizeToolName(name);
+  const label = server ? `${tool} · ${server}` : tool;
+  const subject = detail && detail !== name ? detail : "";
+  return make("tool", `Used ${label}`, `Using ${label}`, subject);
+}
+
+function humanizeToolName(name) {
+  const mcp = name.match(/^mcp__(.+?)__(.+)$/);
+  if (mcp) return { server: mcp[1], tool: mcp[2].replace(/_/g, " ") };
+  return { server: "", tool: name.replace(/_/g, " ") };
 }
 
 // What a permission prompt is asking for, as something Claude is about to do
@@ -1195,14 +1348,31 @@ function shotsHTML(msg) {
     .join("")}</div>`;
 }
 
+// A tool this file doesn't have a dedicated card for has no subject field to
+// show its input through, so without this the guest sees a verb and nothing
+// else — no idea what it was actually called with.
+function paramsHTML(msg) {
+  const input = msg.input && typeof msg.input === "object" ? msg.input : {};
+  const keys = Object.keys(input).filter((k) => input[k] !== undefined && input[k] !== null && input[k] !== "");
+  if (!keys.length) return "";
+  const rows = keys
+    .map((k) => {
+      const raw = typeof input[k] === "object" ? JSON.stringify(input[k]) : String(input[k]);
+      return `<div class="param-row"><span class="param-key">${escapeHtml(k)}</span><span class="param-val">${escapeHtml(raw.slice(0, 300))}</span></div>`;
+    })
+    .join("");
+  return `<div class="params">${rows}</div>`;
+}
+
 function toolBodyHTML(msg) {
   const shots = shotsHTML(msg);
   const diff = diffHTML(msg);
   const out = outputHTML(msg);
-  if (!shots && !diff && !out) {
+  const params = !diff && toolInfo(msg).kind === "tool" ? paramsHTML(msg) : "";
+  if (!shots && !diff && !out && !params) {
     return msg.status === "running" ? "" : `<div class="tool-empty">No output.</div>`;
   }
-  return `${shots}${diff}${out}`;
+  return `${params}${shots}${diff}${out}`;
 }
 
 function toolRowHTML(msg) {
@@ -1395,12 +1565,16 @@ function sheetHTML() {
     return sheetWrap("Your Claude account", byoHTML());
   }
   if (state.sheet === "slash") {
-    return sheetWrap(
-      "Slash commands",
-      SLASH.map(
-        (s) => `<button type="button" class="item" data-slash="${escapeHtml(s.cmd)}">${escapeHtml(s.cmd)}<span>${escapeHtml(s.hint)}</span></button>`
-      ).join("")
-    );
+    const filter = state.slashFilter || "";
+    const matches = filter ? SLASH.filter((s) => s.cmd.slice(1).toLowerCase().startsWith(filter)) : SLASH;
+    const list = matches.length
+      ? matches
+          .map(
+            (s) => `<button type="button" class="item" data-slash="${escapeHtml(s.cmd)}">${escapeHtml(s.cmd)}<span>${escapeHtml(s.hint)}</span></button>`
+          )
+          .join("")
+      : `<p class="sheet-empty">No commands match "/${escapeHtml(filter)}".</p>`;
+    return sheetWrap("Slash commands", list);
   }
   if (state.sheet === "menu") {
     const modes = MODES.map(
@@ -1897,6 +2071,12 @@ function messageHTML(msg) {
   if (msg.kind === "system") {
     return `<div class="msg system"><div class="bubble">${escapeHtml(msg.text)}</div></div>`;
   }
+  if (msg.kind === "compact") {
+    const summary = (msg.summary || "").trim();
+    return `<div class="msg compact"><div class="compact-line">
+      <span class="glyph">↺</span><span>Compacted the conversation</span>
+    </div>${summary ? `<div class="compact-summary">${escapeHtml(summary)}</div>` : ""}</div>`;
+  }
   if (msg.kind === "tool") {
     return `<div class="msg tools"><div class="group open">${toolRowHTML(msg)}</div></div>`;
   }
@@ -1920,10 +2100,18 @@ function messageHTML(msg) {
     const diff = msg.diff ? diffHTML(msg) : "";
     const stat = msg.diff ? (() => { const d = diffOf(msg); return statBadge(d.added, d.removed); })() : "";
     const asking = ASK_VERB[msg.name] || `use ${msg.name}`;
+    // ExitPlanMode's whole point is that the guest reads the plan before
+    // approving it — the tool has no file_path/command/etc. for toolInfo() to
+    // surface, so without this the card asked for a blind yes/no.
+    const plan = msg.name === "ExitPlanMode" && typeof msg.input?.plan === "string" ? msg.input.plan.trim() : "";
+    const askLine = plan
+      ? ""
+      : `<p class="ask-line"><span class="glyph">${KIND_ICON[info.kind] || "•"}</span>
+      <span class="subject ${info.kind === "run" ? "mono" : ""}">${escapeHtml(info.subject || msg.detail || "")}</span>${stat}</p>`;
+    const planBlock = plan ? `<div class="plan-text">${renderMarkdown(plan)}</div>` : "";
     return `<div class="msg permission"><div class="permission">
       <strong>Allow Claude to ${escapeHtml(asking)}?</strong>
-      <p class="ask-line"><span class="glyph">${KIND_ICON[info.kind] || "•"}</span>
-      <span class="subject ${info.kind === "run" ? "mono" : ""}">${escapeHtml(info.subject || msg.detail || "")}</span>${stat}</p>${diff}
+      ${askLine}${planBlock}${diff}
       <div class="row">
         <button class="btn ghost small" data-deny="${escapeHtml(msg.requestId)}">Deny</button>
         <button class="btn small" data-allow="${escapeHtml(msg.requestId)}">Allow</button>
@@ -2024,10 +2212,17 @@ function bindComposer() {
   draft.addEventListener("input", () => {
     draft.style.height = "auto";
     draft.style.height = Math.min(draft.scrollHeight, 128) + "px";
-    if (draft.value === "/") {
+    // The in-chat render path only ever touches #log/#sheet-host/etc, never
+    // #draft itself, so re-rendering on every keystroke here is safe — it
+    // doesn't reset the textarea's cursor the way a full render() would.
+    if (draft.value.startsWith("/") && !draft.value.includes("\n")) {
       state.sheet = "slash";
+      state.slashFilter = draft.value.slice(1).toLowerCase();
       render();
-      $("#draft")?.focus();
+    } else if (state.sheet === "slash") {
+      state.sheet = null;
+      state.slashFilter = "";
+      render();
     }
   });
   form.onsubmit = (ev) => {
@@ -2040,6 +2235,7 @@ function bindComposer() {
   $("#stop")?.addEventListener("click", () => wsSend({ type: "interrupt" }));
   $("#slash")?.addEventListener("click", () => {
     state.sheet = state.sheet === "slash" ? null : "slash";
+    state.slashFilter = "";
     render();
   });
   $("#menu")?.addEventListener("click", () => {
@@ -2183,11 +2379,28 @@ async function loadFiles(rel) {
   render();
 }
 
+// Matches the backend's own cap (claude_chat.py send_user), which silently
+// truncates past this — capping here too, cumulatively rather than per
+// picker call, means the guest never queues more than they can actually send.
+const MAX_PENDING_IMAGES = 4;
+
 async function ingestFiles(fileList) {
-  const files = [...(fileList || [])].slice(0, 4);
+  const all = [...(fileList || [])];
+  const room = Math.max(0, MAX_PENDING_IMAGES - state.images.length);
+  const files = all.slice(0, room);
   for (const file of files) {
     const packed = await compressImage(file);
     if (packed) state.images.push(packed);
+  }
+  if (all.length > files.length) {
+    // state.status only ever shows on the join/floor screens — the chat log
+    // is the one place the guest is actually looking right now, so that's
+    // where a dropped-photo notice has to land, not a status line nobody sees.
+    upsert({
+      id: uid(),
+      kind: "system",
+      text: `Only ${MAX_PENDING_IMAGES} photos can go with one message — ${all.length - files.length} not added.`,
+    });
   }
   render();
 }

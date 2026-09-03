@@ -332,6 +332,7 @@ input[type="text"], input[type="url"] {
   color: var(--ink);
 }
 .sheet button.item span { display: block; color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+.sheet-empty { color: var(--muted); font-size: 0.85rem; padding: 0.6rem 0.1rem; }
 /* Activity: a light card of tool rows that collapses to one summary line. */
 .group {
   width: 100%;
@@ -404,6 +405,10 @@ input[type="text"], input[type="url"] {
 }
 .tool-body { border-top: 1px solid var(--rule); }
 .tool-empty { padding: 0.55rem 0.7rem; color: var(--muted); font-size: 0.8rem; }
+.params { padding: 0.4rem 0.7rem; font-family: var(--mono); font-size: 0.78rem; }
+.param-row { display: flex; gap: 0.5rem; padding: 0.15rem 0; }
+.param-key { color: var(--muted); flex: 0 0 auto; }
+.param-val { overflow-wrap: anywhere; }
 /* What the seat's browser saw. Dark behind it, like the terminal output it
    sits next to, so a page with a white background still reads as a picture of
    a page rather than as a hole in the card. */
@@ -502,6 +507,17 @@ input[type="text"], input[type="url"] {
 }
 .bubble hr { border: 0; border-top: 1px solid var(--rule); margin: 0.7rem 0; }
 .bubble a { color: var(--espresso); overflow-wrap: anywhere; }
+.md-table-wrap { overflow-x: auto; margin: 0.5rem 0; }
+.md-table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+.md-table th, .md-table td {
+  border: 1px solid var(--rule);
+  padding: 0.3rem 0.55rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.md-table th { font-weight: 650; background: rgba(0, 0, 0, 0.04); }
+.plan-text { margin: 0.4rem 0 0.7rem; font-family: var(--font) !important; color: var(--ink); }
+.plan-text .md-h:first-child { margin-top: 0; }
 .ask-line { display: flex; align-items: baseline; gap: 0.35rem; font-family: var(--font) !important; }
 .term, .output, .bubble pre, .tool-body pre {
   display: block;
@@ -586,7 +602,7 @@ input[type="text"], input[type="url"] {
 
 .msg { max-width: 92%; min-width: 0; }
 .msg.user { align-self: flex-end; }
-.msg.assistant, .msg.system, .msg.tools, .msg.permission, .msg.thinking, .msg.ask { align-self: flex-start; }
+.msg.assistant, .msg.system, .msg.tools, .msg.permission, .msg.thinking, .msg.ask, .msg.compact { align-self: flex-start; }
 .msg.tools, .msg.assistant, .msg.thinking { max-width: 100%; width: 100%; }
 .bubble {
   padding: 0.7rem 0.85rem;
@@ -612,6 +628,19 @@ input[type="text"], input[type="url"] {
   border-bottom-left-radius: 6px;
 }
 .msg.system .bubble { background: transparent; color: var(--muted); padding: 0.2rem 0.2rem; font-size: 0.86rem; }
+.msg.compact { width: 100%; }
+.compact-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0.3rem 0;
+}
+.compact-line::after { content: ""; flex: 1; border-top: 1px solid var(--rule); }
+.compact-summary { color: var(--muted); font-size: 0.84rem; padding: 0 0.1rem 0.4rem; }
 .bubble p { margin: 0.4rem 0; }
 .bubble p:first-child { margin-top: 0; }
 .bubble p:last-child { margin-bottom: 0; }
