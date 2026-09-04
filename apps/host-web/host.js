@@ -681,12 +681,19 @@ function renderUsage(data) {
 // Solutions are individual tasks, but a project is the unit that deploys and
 // the unit a guest gets locked into — so the desk lists tasks grouped under
 // their project rather than flat, matching how a guest picks one.
+function issueBadgeHTML(item) {
+  if (!item.github_issue_number) return "";
+  const href = item.github_issue_url ? ` href="${escapeHtml(item.github_issue_url)}" target="_blank" rel="noopener"` : "";
+  const tag = item.github_issue_url ? "a" : "span";
+  return ` <${tag} class="quiet"${href}>#${item.github_issue_number}</${tag}>`;
+}
+
 function boardTaskRowHTML(item, occ) {
   const taken = occ.some((s) => s.session.board_id === item.id);
   return `<article class="q-item nested">
     <span class="mark ${taken ? "live" : ""}">${taken ? "●" : "✓"}</span>
     <div>
-      <strong>${taken ? "Live" : "Next"}: ${escapeHtml(item.title)}</strong>
+      <strong>${taken ? "Live" : "Next"}: ${escapeHtml(item.title)}${issueBadgeHTML(item)}</strong>
       <p class="quiet">${item.wellness_minutes} min</p>
     </div>
   </article>`;
@@ -940,6 +947,23 @@ $("fetchProject").addEventListener("click", async () => {
   try {
     const res = await api(`/api/projects/${id}/fetch`, { method: "POST", headers: jsonHeaders });
     msg.textContent = `Ready at ${res.local_path}`;
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+$("syncIssues").addEventListener("click", async () => {
+  const id = $("projectSel").value;
+  const msg = $("fetchMsg");
+  if (!id) {
+    msg.textContent = "Pick a project first.";
+    return;
+  }
+  msg.textContent = "Syncing GitHub issues…";
+  try {
+    const res = await api(`/api/projects/${id}/sync-issues`, { method: "POST", headers: jsonHeaders });
+    msg.textContent = `Synced: ${res.added} added, ${res.updated} updated, ${res.removed} closed.`;
+    await refresh();
   } catch (err) {
     msg.textContent = err.message;
   }

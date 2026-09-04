@@ -55,6 +55,29 @@ def _git_remote(dest: Path) -> str | None:
         return None
 
 
+#: Matches both `https://github.com/owner/repo(.git)` and `git@github.com:owner/repo(.git)`.
+_GITHUB_REMOTE_RE = re.compile(
+    r"github\.com[:/]+(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
+)
+
+
+def github_repo_slug(remote_url: str | None) -> str | None:
+    """``owner/repo`` if this remote is a github.com repo, else None.
+
+    The ``projects.github`` column just stores whatever ``origin`` points to —
+    any git host, not necessarily GitHub — so this is the one place that
+    decides whether a project's Solutions can be sourced from GitHub Issues.
+    """
+    match = _GITHUB_REMOTE_RE.search((remote_url or "").strip())
+    if not match:
+        return None
+    return f"{match.group('owner')}/{match.group('repo')}"
+
+
+def is_github_project(project: dict[str, Any]) -> bool:
+    return github_repo_slug(project.get("github")) is not None
+
+
 def use_local(path: str, name: str | None = None) -> dict[str, str | None]:
     dest = Path(path).expanduser().resolve()
     if not dest.is_dir():

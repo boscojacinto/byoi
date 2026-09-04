@@ -1724,10 +1724,18 @@ function joinHTML() {
 // is what deploys and what a guest can be locked out of — so the guest
 // picks a project first, then a task within it, rather than tasks flat.
 function taskCardHTML(item, session, locked) {
+  const issue = item.github_issue_number
+    ? `<p class="pill">${
+        item.github_issue_url
+          ? `<a href="${escapeHtml(item.github_issue_url)}" target="_blank" rel="noopener">Issue #${item.github_issue_number}</a>`
+          : `Issue #${item.github_issue_number}`
+      }</p>`
+    : "";
   return `<article class="brief nested">
     <h4>${escapeHtml(item.title)}</h4>
     <p>${escapeHtml(item.brief)}</p>
     <p class="pill">${item.wellness_minutes} min · break at ${item.break_after}</p>
+    ${issue}
     <button class="btn ghost small" data-claim="${escapeHtml(item.id)}" ${!session || state.busy || locked ? "disabled" : ""}>Choose</button>
   </article>`;
 }
