@@ -227,6 +227,47 @@ and the VM's live copy (the one with the real domain and DNS token) survives
 untouched. Confirm which case you're in — `ls deploy/.env` locally — before
 running the rsync, not after.
 
+## Object storage for brief media (optional, one time)
+
+Only if briefs need input files — photos to build a page from, a logo to match.
+Skip it otherwise; the salon runs briefs without media perfectly well.
+
+```bash
+./utho.py storage-init --dcslug innoida    # creates a bucket — this costs money
+./utho.py storage-show
+```
+
+`storage-init` creates one bucket, sets its policy to `private`, mints **two**
+access keys, and grants one `read` and the other `full` on that bucket. It
+prints each secret once.
+
+Two keys rather than one because Utho grants a key `read`/`write`/`full`/`none`
+on a *whole bucket* — no prefix scoping, no policy document. So the read/write
+boundary can only be drawn by which credential a code path holds: the desk's
+claim path fetches media with the read key, and only the operator's upload route
+ever holds the write key. A per-project key would mean a per-project bucket, and
+each bucket is its own monthly charge.
+
+Store the pair the script prints, on the VM:
+
+```bash
+./scripts/salon-secrets.sh utho-storage-read
+./scripts/salon-secrets.sh utho-storage-write
+```
+
+and add the non-secret half to `deploy/.env` (so it survives the day-two rsync
+caveat above like everything else there):
+
+```
+BYOI_UTHO_BUCKET=byoi-salon-media-ab12cd
+BYOI_UTHO_DC=innoida
+```
+
+`storage-init` cannot set versioning or lifecycle rules — no API for them that
+this script knows — so it prints them as a manual checklist. Do both in the
+console before a salon relies on the bucket: versioning is what protects a
+brief from someone overwriting the asset it depends on.
+
 ## Teardown
 
 Only when the user asks. Back up first — the archive holds the salon CA key, the

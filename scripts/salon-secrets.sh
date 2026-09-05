@@ -6,6 +6,8 @@
 #   ./scripts/salon-secrets.sh vercel
 #   ./scripts/salon-secrets.sh neon
 #   ./scripts/salon-secrets.sh upstash
+#   ./scripts/salon-secrets.sh utho-storage-read   # bucket key the claim path reads with
+#   ./scripts/salon-secrets.sh utho-storage-write  # bucket key operator uploads write with
 #   ./scripts/salon-secrets.sh github-app   # only for carrying one over manually —
 #                                            # normally created from the desk's
 #                                            # Projects tab ("Set up GitHub App")
@@ -87,6 +89,16 @@ OPPY
     printf '%s' "$email" > "$DIR/upstash.email"; chmod 600 "$DIR/upstash.email"
     write_secret upstash.token "Upstash API key (console.upstash.com/account/api)"
     ;;
+  utho-storage-read|utho-storage-write)
+    # Two keys on one bucket, because Utho grants a key read/write on a *whole*
+    # bucket — there is no prefix scoping, so the read/write boundary can only
+    # be drawn by which credential the code path holds. The read key is what
+    # the claim path uses to fetch a brief's media; the write key never leaves
+    # the operator's upload route. `deploy-utho/utho.py storage-init` mints both.
+    role="${1#utho-storage-}"
+    write_secret "utho-storage-$role.key" "Utho Object Storage $role access key"
+    write_secret "utho-storage-$role.secret" "Utho Object Storage $role secret key"
+    ;;
   github-app)
     # A GitHub App is normally created from the desk UI itself (Projects tab
     # → "Set up GitHub App"), which stores these automatically. This exists
@@ -124,7 +136,7 @@ for row in status():
 PY
     ;;
   *)
-    echo "usage: $0 [operator|print-relay|vercel|neon|upstash|github-app|--list]" >&2
+    echo "usage: $0 [operator|print-relay|vercel|neon|upstash|github-app|utho-storage-read|utho-storage-write|--list]" >&2
     exit 2
     ;;
 esac

@@ -778,6 +778,8 @@ class ClaudeChat:
         self.last_usage: dict[str, Any] | None = None
         self.suggestions: list[str] = []
         self.extra_dirs: list[str] = []
+        # The one entry in extra_dirs the desk owns: this visit's input media.
+        self.media_dir: str | None = None
         self.workspace_path: Path | None = None
         self.account_label: str | None = None
         self.config_dir: Path | None = None
@@ -794,12 +796,26 @@ class ClaudeChat:
 
         return default_pool
 
-    def set_workspace(self, path: str | Path) -> Path:
+    def set_workspace(self, path: str | Path, media_dir: str | Path | None = None) -> Path:
         dest = Path(path).expanduser().resolve()
         if not dest.is_dir():
             raise FileNotFoundError(f"not a directory: {dest}")
         self.reset()
         self.workspace_path = dest
+
+        # A brief's input media sits beside the clone rather than in it, so it
+        # is outside Claude's cwd and needs --add-dir to be readable at all.
+        # Replace rather than append: extra_dirs outlives reset(), and a stale
+        # path from the previous visit would otherwise pile up here.
+        if self.media_dir and self.media_dir in self.extra_dirs:
+            self.extra_dirs.remove(self.media_dir)
+        self.media_dir = None
+        if media_dir:
+            found = Path(media_dir).expanduser().resolve()
+            if found.is_dir():
+                self.media_dir = str(found)
+                if self.media_dir not in self.extra_dirs:
+                    self.extra_dirs.append(self.media_dir)
         return dest
 
     def assign_account(self, account: Account | None) -> None:

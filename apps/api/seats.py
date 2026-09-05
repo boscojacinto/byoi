@@ -35,6 +35,8 @@ CONTROL_PORT = 8788
 # Where a seat container sees its own tree. The desk sees the same bytes under
 # runtime_dir(session)/workspace.
 GUEST_WORKSPACE = "/app/data/workspace"
+# A brief's input media, beside the clone rather than in it — see media_dir().
+GUEST_MEDIA = f"{GUEST_WORKSPACE}/media"
 READY_TIMEOUT = float(os.environ.get("BYOI_SEAT_READY_TIMEOUT", "120"))
 READY_POLL_S = 1.0
 
@@ -108,6 +110,23 @@ def workspace_dir(session_id: str) -> Path:
     It lives under runtime_dir(), so freeing the seat already removes it.
     """
     dest = runtime_dir(session_id) / "workspace"
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest.resolve()
+
+
+def media_dir(session_id: str) -> Path:
+    """Where a brief's required input files land for this visit.
+
+    A sibling of the project clone, not a folder inside it. ``submission.py``
+    runs ``git add -A`` at the clone's toplevel, so anything placed in the tree
+    would ride along into the guest's submission ref and out to origin on
+    Solutions sync. Sitting beside the clone keeps it out of the diff while
+    staying inside the workspace that is already bind-mounted, so no second
+    mount is needed and static mode behaves the same as an on-demand seat.
+
+    Under runtime_dir(), so freeing the seat already removes it.
+    """
+    dest = workspace_dir(session_id) / "media"
     dest.mkdir(parents=True, exist_ok=True)
     return dest.resolve()
 

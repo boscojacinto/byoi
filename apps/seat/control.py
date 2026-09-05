@@ -24,6 +24,8 @@ class AdmitIn(BaseModel):
 
 class WorkspaceIn(BaseModel):
     path: str
+    # This brief's input media, beside the clone. Optional: most briefs have none.
+    media_dir: str | None = None
 
 
 class VerifyIn(BaseModel):
@@ -151,7 +153,7 @@ def set_workspace(request: Request, body: WorkspaceIn, authorization: str | None
     from .claude_chat import session as chat_session
 
     try:
-        path = chat_session.set_workspace(body.path)
+        path = chat_session.set_workspace(body.path, body.media_dir)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except PermissionError as exc:

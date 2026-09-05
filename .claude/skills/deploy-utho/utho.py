@@ -17,6 +17,8 @@ then runs on.
     ./utho.py ip salon.example.com
     ./utho.py show salon.example.com
     ./utho.py destroy salon.example.com
+    ./utho.py storage-init                # media bucket + its read/write keys
+    ./utho.py storage-show
 
 The token comes from ``$UTHO_API_TOKEN`` or ``~/.config/byoi/utho.token``. It
 lives there rather than in ``data/secrets/`` deliberately: that directory is
@@ -319,6 +321,95 @@ def cmd_destroy(args) -> None:
     print(result.get("message", "destroyed"))
 
 
+# --- object storage -----------------------------------------------------------
+#
+# One bucket holds every project's media. Utho grants an access key
+# read/write/full/none on a *whole bucket* — no prefix scoping, no policy
+# document — so a per-project key would mean a per-project bucket, and a bucket
+# is a billed, globally-named allocation. Two keys on one bucket instead: the
+# desk reads a brief's media with one and the operator uploads with the other.
+
+
+def _find_secret(payload: dict) -> tuple[str | None, str | None]:
+    """Pull an access/secret pair out of whatever shape Utho answered with."""
+    candidates: list[dict] = [payload]
+    candidates += [v for v in payload.values() if isinstance(v, dict)]
+    for row in rows(payload):
+        candidates.append(row)
+    access = secret = None
+    for row in candidates:
+        for key, value in row.items():
+            if not isinstance(value, str) or not value:
+                continue
+            low = key.lower().replace("_", "")
+            if secret is None and "secret" in low:
+                secret = value
+            elif access is None and "access" in low and "secret" not in low:
+                access = value
+    return access, secret
+
+
+def cmd_storage_init(args) -> None:
+    dc = args.dcslug or os.environ.get("UTHO_DCSLUG", "")
+    if not dc:
+        raise UthoError("no datacenter — pass --dcslug or set UTHO_DCSLUG (./utho.py zones)")
+    name = args.name or f"byoi-salon-media-{os.urandom(3).hex()}"
+
+    print(f"Creating bucket {name} ({args.size} GB, {args.billing}) in {dc} — this costs money.")
+    api("POST", "objectstorage/bucket/create/", {
+        "dcslug": dc, "name": name, "size": str(args.size), "billing": args.billing,
+    })
+    api("POST", f"objectstorage/{dc}/bucket/{name}/policy/private/", {})
+    print(f"  bucket {name} created, policy private")
+
+    for role, permission, script in (
+        ("read", "read", "utho-storage-read"),
+        ("write", "full", "utho-storage-write"),
+    ):
+        key_name = f"byoi-desk-{role}"
+        made = api("POST", f"objectstorage/{dc}/accesskey/create", {"accesskey": key_name})
+        access, secret = _find_secret(made)
+        api(
+            "POST",
+            f"objectstorage/{dc}/bucket/{name}/permission/{permission}/accesskey/{access or key_name}",
+            {"selected_permission": permission, "selected_key": access or key_name},
+        )
+        print()
+        print(f"  {key_name}: {permission} on {name}")
+        if access and secret:
+            print(f"    access key: {access}")
+            print(f"    secret key: {secret}   <- shown once")
+            print(f"    store it:   ./scripts/salon-secrets.sh {script}")
+        else:
+            # Better to hand the operator the raw answer than to guess wrong
+            # about a field name and drop a secret they cannot see again.
+            print("    could not find the key pair in Utho's reply — read it here:")
+            print("    " + json.dumps(made)[:600])
+
+    print()
+    print("Then put these in deploy/.env so the desk knows which bucket to use:")
+    print(f"  BYOI_UTHO_BUCKET={name}")
+    print(f"  BYOI_UTHO_DC={dc}")
+    print()
+    print("Still to do by hand in the console (no API for them that this script knows):")
+    print(f"  - enable versioning on {name}")
+    print("  - add a lifecycle rule expiring non-current versions after 30d")
+
+
+def cmd_storage_show(args) -> None:
+    dc = args.dcslug or os.environ.get("UTHO_DCSLUG", "")
+    if not dc:
+        raise UthoError("no datacenter — pass --dcslug or set UTHO_DCSLUG")
+    buckets = rows(api("GET", f"objectstorage/{dc}/bucket/"))
+    if not buckets:
+        print(f"no buckets in {dc}")
+    for row in buckets:
+        print(f"{row.get('name', '?'):<32} {row.get('size', '?')} GB  {row.get('policy', '')}")
+    print()
+    for row in rows(api("GET", f"objectstorage/{dc}/accesskeys")):
+        print(f"key {row.get('accesskey') or row.get('name', '?'):<28} {row.get('status', '')}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="utho.py",
@@ -350,6 +441,19 @@ def main(argv: list[str] | None = None) -> int:
     create.set_defaults(fn=cmd_create)
 
     sub.add_parser("list", help="servers on the account").set_defaults(fn=cmd_list)
+
+    storage_init = sub.add_parser(
+        "storage-init", help="create the media bucket and its two keys (this costs money)"
+    )
+    storage_init.add_argument("--dcslug", default="")
+    storage_init.add_argument("--name", default="", help="bucket name; globally unique")
+    storage_init.add_argument("--size", type=int, default=10, metavar="GB")
+    storage_init.add_argument("--billing", default="Monthly")
+    storage_init.set_defaults(fn=cmd_storage_init)
+
+    storage_show = sub.add_parser("storage-show", help="buckets and access keys")
+    storage_show.add_argument("--dcslug", default="")
+    storage_show.set_defaults(fn=cmd_storage_show)
 
     for name, fn, helptext in (
         ("show", cmd_show, "one server in detail"),

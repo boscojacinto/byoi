@@ -933,6 +933,7 @@ function resetAddDrawer() {
   $("briefSection").hidden = true;
   $("projectSel").value = "";
   $("briefProjectId").value = "";
+  showMediaFor("");
   $("projectSyncMsg").textContent = "";
   $("suggestMsg").textContent = "";
   $("briefMsg").textContent = "";
@@ -963,6 +964,7 @@ document.querySelectorAll("#addModeToggle [data-mode]").forEach((btn) => {
     $("briefSection").hidden = true;
     $("projectSel").value = "";
     $("briefProjectId").value = "";
+    showMediaFor("");
   });
 });
 
@@ -1070,16 +1072,107 @@ $("projectSel").addEventListener("change", async () => {
   const syncMsg = $("projectSyncMsg");
   if (!id) {
     $("briefSection").hidden = true;
+    showMediaFor("");
     return;
   }
   $("briefProjectId").value = id;
   $("briefSection").hidden = false;
+  showMediaFor(id);
   syncMsg.textContent = "Syncing GitHub issues…";
   try {
     const res = await api(`/api/projects/${id}/sync-issues`, { method: "POST", headers: jsonHeaders });
     syncMsg.textContent = `Synced: ${res.added} added, ${res.updated} updated, ${res.removed} closed.`;
   } catch (err) {
     syncMsg.textContent = err.message.includes("not a GitHub repo") ? "" : err.message;
+  }
+});
+
+// --- media a brief needs as an input ---------------------------------------
+//
+// Uploaded against the *project*, not this one solution, so the next guest on
+// it gets the same files. Revealed alongside the solution fields, once a
+// project has been picked or created.
+//
+// The file's bytes are the request body rather than a multipart part: the desk
+// image carries no multipart parser, and this is the only client that calls it.
+
+async function refreshMedia() {
+  const list = $("mediaList");
+  const id = $("briefProjectId").value;
+  if (!list) return;
+  if (!id) {
+    list.innerHTML = "";
+    return;
+  }
+  try {
+    const res = await api(`/api/projects/${id}/media`);
+    if (!res.configured) {
+      list.innerHTML = "<li>Object storage is not set up on this salon.</li>";
+      return;
+    }
+    list.innerHTML = (res.media || [])
+      .map(
+        (m) =>
+          `<li>${escapeHtml(m.filename)}${m.role ? ` — ${escapeHtml(m.role)}` : ""} ` +
+          `<button type="button" class="text" data-media="${m.id}">remove</button></li>`,
+      )
+      .join("");
+  } catch (err) {
+    list.innerHTML = `<li>${escapeHtml(err.message)}</li>`;
+  }
+}
+
+// Called wherever briefSection is revealed — a project is what media hangs off.
+function showMediaFor(id) {
+  $("mediaSection").hidden = !id;
+  $("mediaMsg").textContent = "";
+  $("mediaFile").value = "";
+  $("mediaRole").value = "";
+  if (id) refreshMedia().catch(() => {});
+}
+
+$("mediaUpload").addEventListener("click", async () => {
+  const id = $("briefProjectId").value;
+  const msg = $("mediaMsg");
+  const picker = $("mediaFile");
+  if (!id) {
+    msg.textContent = "Pick a project first.";
+    return;
+  }
+  const files = Array.from(picker.files || []);
+  if (!files.length) {
+    msg.textContent = "Choose a file first.";
+    return;
+  }
+  const role = $("mediaRole").value || "";
+  msg.textContent = `Uploading ${files.length} file(s)…`;
+  try {
+    for (const file of files) {
+      const query = `filename=${encodeURIComponent(file.name)}&role=${encodeURIComponent(role)}`;
+      await api(`/api/projects/${id}/media?${query}`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      });
+    }
+    msg.textContent = `Added ${files.length} file(s).`;
+    picker.value = "";
+    $("mediaRole").value = "";
+    await refreshMedia();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+$("mediaList").addEventListener("click", async (event) => {
+  const id = event.target && event.target.dataset ? event.target.dataset.media : "";
+  const project = $("briefProjectId").value;
+  if (!id || !project) return;
+  try {
+    await api(`/api/projects/${project}/media/${id}`, { method: "DELETE", headers: jsonHeaders });
+    await refreshMedia();
+  } catch (err) {
+    $("mediaMsg").textContent = err.message;
   }
 });
 
@@ -1112,6 +1205,7 @@ $("newProject").addEventListener("submit", async (ev) => {
     fillProjectSelect(created.id);
     $("briefProjectId").value = created.id;
     $("briefSection").hidden = false;
+    showMediaFor(created.id);
     await maybeOfferGithubAppLink(created);
   } catch (err) {
     msg.textContent = err.message;

@@ -70,6 +70,26 @@ CREATE TABLE IF NOT EXISTS board (
     github_issue_url TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id)
 );
+-- Media a brief needs as an *input* to the work: the photos a landing page is
+-- built from, a logo to match. It hangs off the project rather than the brief
+-- because a project outlives any one guest and can carry several briefs; a row
+-- naming a board_id narrows it to that brief alone.
+CREATE TABLE IF NOT EXISTS project_media (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    board_id TEXT,
+    object_key TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    size INTEGER NOT NULL DEFAULT 0,
+    -- sha256 of the bytes: names the desk's local cache entry, and catches a
+    -- truncated download before it reaches a seat.
+    checksum TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id),
+    FOREIGN KEY (board_id) REFERENCES board(id)
+);
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     seat_id TEXT NOT NULL,
@@ -429,6 +449,91 @@ class Store:
             (installation_id, project_id),
         )
         self.conn.commit()
+
+    # --- media a brief needs as an input ---------------------------------
+
+    def add_media(
+        self,
+        *,
+        project_id: str,
+        object_key: str,
+        filename: str,
+        content_type: str,
+        size: int,
+        checksum: str,
+        role: str = "",
+        board_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.project(project_id):
+            raise KeyError("unknown project")
+        item = {
+            "id": str(uuid.uuid4())[:8],
+            "project_id": project_id,
+            "board_id": board_id or None,
+            "object_key": object_key,
+            "filename": filename,
+            "content_type": content_type or "application/octet-stream",
+            "size": int(size),
+            "checksum": checksum,
+            "role": (role or "").strip(),
+            "created_at": time.time(),
+        }
+        self.conn.execute(
+            "INSERT INTO project_media (id, project_id, board_id, object_key, filename, "
+            "content_type, size, checksum, role, created_at) VALUES (:id,:project_id,:board_id,"
+            ":object_key,:filename,:content_type,:size,:checksum,:role,:created_at)",
+            item,
+        )
+        self.conn.commit()
+        return item
+
+    def media(self, media_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM project_media WHERE id=?", (media_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def media_for_project(self, project_id: str | None) -> list[dict[str, Any]]:
+        if not project_id:
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM project_media WHERE project_id=? ORDER BY created_at",
+            (project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def media_for_board(self, board_id: str) -> list[dict[str, Any]]:
+        """What this brief needs: the project's shared media plus its own.
+
+        A row with no board_id belongs to every brief on the project; one that
+        names a board belongs to that brief alone.
+        """
+        item = self.board_item(board_id)
+        if not item or not item.get("project_id"):
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM project_media WHERE project_id=? AND (board_id IS NULL OR board_id=?) "
+            "ORDER BY created_at",
+            (item["project_id"], board_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_media_board(self, media_id: str, board_id: str | None) -> dict[str, Any]:
+        if not self.media(media_id):
+            raise KeyError("unknown media")
+        self.conn.execute(
+            "UPDATE project_media SET board_id=? WHERE id=?", (board_id or None, media_id)
+        )
+        self.conn.commit()
+        return self.media(media_id)  # type: ignore[return-value]
+
+    def remove_media(self, media_id: str) -> dict[str, Any] | None:
+        item = self.media(media_id)
+        if not item:
+            return None
+        self.conn.execute("DELETE FROM project_media WHERE id=?", (media_id,))
+        self.conn.commit()
+        return item
 
     def _busy_project_ids(self) -> set[str]:
         rows = self.conn.execute(

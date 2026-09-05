@@ -437,6 +437,41 @@ The clone's `origin` is set to whatever the project calls `origin`, so a guest
 running `git push` aims at the real remote and not at a path that exists only
 inside the desk container. A project that is not a git repo is copied instead.
 
+### Media a brief needs as an input
+
+Some briefs cannot be started without files: the three product photos a landing
+page is built from, a logo to match. The desk uploads those against the
+**project** (Solutions tab → pick a project → *Add media*), so the next guest on
+the same project gets them too, and they outlive any one visit.
+
+They live in a single Utho bucket, named by `BYOI_UTHO_BUCKET` in `deploy/.env`
+and keyed `projects/<project_id>/…`. Create the bucket and its keys once with
+`.claude/skills/deploy-utho/utho.py storage-init`. With nothing configured the
+salon simply runs briefs without media.
+
+**Two keys, because Utho grants on a whole bucket.** An access key gets
+`read`/`write`/`full`/`none` on an entire bucket — there is no prefix scoping and
+no policy document, so a per-project key would mean paying for a per-project
+bucket. Instead the split is by role: a read key the claim path fetches with, and
+a write key only the operator's upload route holds. Both are registered in
+`apps/secrets.py`, which is what makes `scrub()` strip them from a seat's
+environment; store them with `scripts/salon-secrets.sh utho-storage-read` and
+`… utho-storage-write`.
+
+At claim time the desk materialises that brief's files into
+`workspace/media/` — **beside** the project clone, never inside it, because
+`submission.py` runs `git add -A` at the clone's toplevel and anything in the
+tree would ride into the guest's submission ref and out to origin. The seat's
+Claude reaches it via `--add-dir`, and a generated `MANIFEST.md` says what each
+file is for.
+
+The seat is handed files rather than links on purpose: its Bash allowlist has no
+`curl` or `wget`, and off-allowlist commands are refused before any approval
+prompt is emitted, so a download URL inside a seat is close to useless. No
+storage credential ever reaches a seat. Downloads pass through a
+`data/media-cache/<sha256>` cache, and a file whose bytes do not match its
+checksum is dropped rather than handed over.
+
 Each brief can include an **acceptance spec**: plain-English facts the
 solution must satisfy, one per line. When the guest marks shipped, the phone
 shows passing and failing cases — one per requirement in the spec.

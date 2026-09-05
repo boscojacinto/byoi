@@ -36,6 +36,8 @@ from . import github_app
 from . import github_issues
 from . import guest_report
 from . import infra as desk_infra
+from . import media as media_ops
+from . import object_store
 from . import operator
 from . import seats
 from . import projects as project_ops
@@ -378,6 +380,76 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             except github_issues.GithubIssuesError as exc:
                 log.warning("BYOI: could not sync issues for new project %s: %s", created["id"], exc)
         return created
+
+    # --- media a brief needs as an input ---------------------------------
+    #
+    # Operator-only, all three. Guests never write to the bucket: it is a
+    # billed resource that any key can read in full, so it stays off the
+    # untrusted path. The guest's chat photos are a separate, transient thing.
+
+    @app.get("/api/projects/{project_id}/media")
+    def get_project_media(project_id: str) -> dict:
+        return {
+            "media": store.media_for_project(project_id),
+            "configured": object_store.configured(),
+        }
+
+    @app.post("/api/projects/{project_id}/media")
+    async def post_project_media(
+        request: Request,
+        project_id: str,
+        filename: str = "",
+        role: str = "",
+        board_id: str = "",
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        """The file's bytes are the request body; its name and description ride
+        in the query string. Raw rather than multipart so the desk image does
+        not need python-multipart for a route only the desk UI ever calls."""
+        require_operator(request, authorization)
+        data = await request.body()
+        try:
+            return media_ops.add(
+                store,
+                project_id=project_id,
+                filename=filename or "file",
+                data=data,
+                content_type=request.headers.get("content-type", ""),
+                role=role,
+                board_id=board_id or None,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "unknown project") from exc
+        except object_store.ObjectStoreError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    @app.delete("/api/projects/{project_id}/media/{media_id}")
+    def delete_project_media(
+        request: Request,
+        project_id: str,
+        media_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        require_operator(request, authorization)
+        gone = media_ops.remove(store, media_id)
+        if not gone:
+            raise HTTPException(404, "unknown media")
+        return {"ok": True, "removed": gone}
+
+    @app.post("/api/board/{board_id}/media/{media_id}")
+    def attach_media_to_board(
+        request: Request,
+        board_id: str,
+        media_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        """Narrow one file to a single brief, or (with board_id 'all') widen it
+        back to every brief on the project."""
+        require_operator(request, authorization)
+        try:
+            return store.set_media_board(media_id, None if board_id == "all" else board_id)
+        except KeyError as exc:
+            raise HTTPException(404, "unknown media") from exc
 
     @app.post("/api/projects/{project_id}/sync-issues")
     def sync_issues_route(
@@ -852,8 +924,30 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     target = seats.seed_workspace(session_id, path)
                 except seats.SeatError as exc:
                     raise HTTPException(502, f"could not put this project on the seat: {exc}") from exc
+            # Files the brief needs as inputs, fetched to a directory beside the
+            # clone. Never fatal: a brief whose photos will not download is
+            # still a brief the guest can work on, and a claim that 502s here
+            # costs them their visit.
+            media_target: str | None = None
+            landed: list = []
+            # Ask before making anything: most briefs have no media, and
+            # media_dir() would otherwise create a runtime folder for every one.
+            if store.media_for_board(body.board_id):
+                try:
+                    landed = media_ops.materialize(
+                        store, body.board_id, seats.media_dir(session_id)
+                    )
+                except Exception as exc:  # noqa: BLE001 - a claim must not fail on media
+                    log.warning("media for %s could not be prepared: %s", body.board_id, exc)
+                    landed = []
+            if landed:
+                # The seat reaches it by the path *it* sees: a container looks at
+                # the bind mount, a static seat at the desk's own filesystem.
+                media_target = (
+                    seats.GUEST_MEDIA if on_demand_seats() else str(seats.media_dir(session_id))
+                )
             try:
-                seat_sync.set_workspace(seat, target)
+                seat_sync.set_workspace(seat, target, media_target)
             except SeatSyncError as exc:
                 raise HTTPException(502, "seat did not switch to this project's folder") from exc
             detected = project_ops.detect(path)

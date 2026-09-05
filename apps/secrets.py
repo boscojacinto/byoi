@@ -33,6 +33,15 @@ SECRETS: dict[str, str] = {
     "BYOI_GITHUB_APP_ID": "github-app.id",
     "BYOI_GITHUB_APP_SLUG": "github-app.slug",
     "BYOI_GITHUB_APP_PRIVATE_KEY": "github-app.pem",
+    # Utho Object Storage, split by role rather than by project: Utho grants a
+    # key read/write on a whole bucket, so the read key is what the claim path
+    # uses to materialise a brief's media and the write key never leaves the
+    # operator's upload route. Both are desk-only — being in this map is what
+    # keeps them out of a seat's environment in static mode.
+    "BYOI_UTHO_S3_READ_KEY": "utho-storage-read.key",
+    "BYOI_UTHO_S3_READ_SECRET": "utho-storage-read.secret",
+    "BYOI_UTHO_S3_WRITE_KEY": "utho-storage-write.key",
+    "BYOI_UTHO_S3_WRITE_SECRET": "utho-storage-write.secret",
 }
 
 

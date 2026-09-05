@@ -166,6 +166,21 @@
         <p id="projectMsg" class="quiet"></p>
       </div>
 
+      <!-- Files a brief needs as *inputs* — the photos a page is built from, a
+           logo to match. They belong to the project, not this one solution, so
+           the next guest on it gets them too. -->
+      <div id="mediaSection" hidden>
+        <p class="eyebrow">Media</p>
+        <p class="quiet">Optional. Files the guest's Claude gets as read-only inputs.</p>
+        <div class="row">
+          <input type="file" id="mediaFile" multiple />
+          <input type="text" id="mediaRole" placeholder="What is it? (e.g. hero shot)" />
+          <button type="button" class="text" id="mediaUpload">Add media</button>
+        </div>
+        <p id="mediaMsg" class="quiet"></p>
+        <ul id="mediaList" class="quiet"></ul>
+      </div>
+
       <div id="briefSection" hidden>
         <p class="eyebrow">Solution</p>
         <form id="newBrief">
