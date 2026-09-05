@@ -115,7 +115,9 @@ class ProjectIn(BaseModel):
     url: str | None = None
     template: str | None = None
     description: str = ""
-    private: bool = True
+    # The desk's own repos are never private — the drawer no longer offers
+    # the choice, so this only matters to a caller that sets it explicitly.
+    private: bool = False
     push: bool = False
 
 

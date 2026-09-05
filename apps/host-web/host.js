@@ -928,14 +928,17 @@ document.querySelectorAll("[data-usage-group]").forEach((btn) => {
 function resetAddDrawer() {
   document.querySelectorAll("#addModeToggle [data-mode]").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === "existing"));
   $("existingProjectMode").hidden = false;
-  $("newProject").hidden = true;
-  $("newBrief").hidden = true;
+  $("newProjectMode").hidden = true;
+  $("newProject").hidden = false; // the form itself, collapsed after a successful save
+  $("briefSection").hidden = true;
   $("projectSel").value = "";
   $("briefProjectId").value = "";
   $("projectSyncMsg").textContent = "";
   $("suggestMsg").textContent = "";
   $("briefMsg").textContent = "";
   $("projectMsg").textContent = "";
+  $("newProject").reset();
+  updateProjectKindFields();
   $("newBrief").reset();
 }
 
@@ -953,9 +956,11 @@ document.querySelectorAll("#addModeToggle [data-mode]").forEach((btn) => {
     document.querySelectorAll("#addModeToggle [data-mode]").forEach((b) => b.classList.toggle("is-on", b === btn));
     const mode = btn.getAttribute("data-mode");
     $("existingProjectMode").hidden = mode !== "existing";
-    $("newProject").hidden = mode !== "new";
+    $("newProjectMode").hidden = mode !== "new";
+    $("newProject").hidden = false;
+    $("projectMsg").textContent = "";
     // Switching modes means picking or creating a project again.
-    $("newBrief").hidden = true;
+    $("briefSection").hidden = true;
     $("projectSel").value = "";
     $("briefProjectId").value = "";
   });
@@ -1064,11 +1069,11 @@ $("projectSel").addEventListener("change", async () => {
   const id = $("projectSel").value;
   const syncMsg = $("projectSyncMsg");
   if (!id) {
-    $("newBrief").hidden = true;
+    $("briefSection").hidden = true;
     return;
   }
   $("briefProjectId").value = id;
-  $("newBrief").hidden = false;
+  $("briefSection").hidden = false;
   syncMsg.textContent = "Syncing GitHub issues…";
   try {
     const res = await api(`/api/projects/${id}/sync-issues`, { method: "POST", headers: jsonHeaders });
@@ -1099,17 +1104,14 @@ $("newProject").addEventListener("submit", async (ev) => {
         path: fd.get("path"),
         template: fd.get("template"),
         description: fd.get("description") || "",
-        private: fd.get("private") === "on",
       }),
     });
     msg.textContent = `${created.name} ready.`;
-    ev.target.reset();
-    ev.target.querySelector('[name="kind"][value="github"]').checked = true;
-    updateProjectKindFields();
+    ev.target.hidden = true; // bifurcates project setup from the solution fields below
     projects.push(created);
     fillProjectSelect(created.id);
     $("briefProjectId").value = created.id;
-    $("newBrief").hidden = false;
+    $("briefSection").hidden = false;
     await maybeOfferGithubAppLink(created);
   } catch (err) {
     msg.textContent = err.message;
