@@ -40,20 +40,40 @@ def test_loopback_is_not_trusted(tmp_path: Path):
     looks like. Trusting it would hand the floor to the internet.
     """
     desk = TestClient(create_app(tmp_path), client=("127.0.0.1", 50000))
-    res = desk.post("/api/board", json={"title": "Loopback brief", "brief": "from the desk PC"})
+    res = desk.post(
+        "/api/board",
+        json={"title": "Loopback brief", "brief": "from the desk PC", "spec": "- works"},
+    )
     assert res.status_code == 401
 
 
 def test_host_can_add_brief(tmp_path: Path):
     client = _client(tmp_path)
-    assert client.post("/api/board", json={"title": "x", "brief": "y"}).status_code == 401
+    assert (
+        client.post("/api/board", json={"title": "x", "brief": "y", "spec": "- works"}).status_code
+        == 401
+    )
     res = client.post(
         "/api/board",
-        json={"title": "Steam the wand", "brief": "document the espresso ritual"},
+        json={
+            "title": "Steam the wand",
+            "brief": "document the espresso ritual",
+            "spec": "- the ritual is documented",
+        },
         headers={"Authorization": "Bearer byoi-host"},
     )
     assert res.status_code == 200
     assert res.json()["title"] == "Steam the wand"
+
+
+def test_adding_a_brief_without_a_spec_is_rejected(tmp_path: Path):
+    client = _client(tmp_path)
+    res = client.post(
+        "/api/board",
+        json={"title": "Steam the wand", "brief": "document the espresso ritual", "spec": "   "},
+        headers={"Authorization": "Bearer byoi-host"},
+    )
+    assert res.status_code == 422
 
 
 def test_checkin_claim_complete_and_slip_dump(tmp_path: Path):

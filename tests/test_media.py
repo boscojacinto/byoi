@@ -283,7 +283,13 @@ def test_claiming_a_brief_puts_its_media_on_the_seat(tmp_path, bucket, monkeypat
         "/api/projects", json={"kind": "local", "path": str(folder), "name": "work"}
     ).json()
     brief = desk.post(
-        "/api/board", json={"title": "Build it", "brief": "from these", "project_id": proj["id"]}
+        "/api/board",
+        json={
+            "title": "Build it",
+            "brief": "from these",
+            "spec": "- uses the supplied photos",
+            "project_id": proj["id"],
+        },
     ).json()
 
     up = desk.post(
@@ -328,7 +334,13 @@ def test_claiming_a_brief_with_no_media_tells_the_seat_nothing(tmp_path, bucket,
         "/api/projects", json={"kind": "local", "path": str(folder), "name": "work"}
     ).json()
     brief = desk.post(
-        "/api/board", json={"title": "No media", "brief": "just code", "project_id": proj["id"]}
+        "/api/board",
+        json={
+            "title": "No media",
+            "brief": "just code",
+            "spec": "- it builds",
+            "project_id": proj["id"],
+        },
     ).json()
 
     seen: list = []

@@ -179,7 +179,8 @@ def test_cloud_claims_use_the_desk_driver(tmp_path, monkeypatch):
         "/api/projects", json={"kind": "local", "name": "p", "path": str(proj)}
     ).json()
     brief = client.post(
-        "/api/board", json={"title": "t", "brief": "b", "project_id": project["id"]}
+        "/api/board",
+        json={"title": "t", "brief": "b", "spec": "- works", "project_id": project["id"]},
     ).json()
     sid = client.post(
         "/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}
