@@ -8,6 +8,7 @@ the host already set up with `gh auth login`, with no new dependency.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any
 
@@ -18,10 +19,15 @@ class GithubIssuesError(RuntimeError):
     """Issues could not be fetched — missing `gh`, not authenticated, no access, etc."""
 
 
-def fetch_open_issues(repo_slug: str, *, limit: int = 100) -> list[dict[str, Any]]:
+def fetch_open_issues(
+    repo_slug: str, *, limit: int = 100, token: str | None = None
+) -> list[dict[str, Any]]:
     """Open issues for ``owner/repo``, newest-updated first.
 
-    Pull requests are excluded — `gh issue list` already omits them.
+    Pull requests are excluded — `gh issue list` already omits them. Without
+    ``token`` this relies on whatever `gh auth login` the host already has;
+    pass a GitHub App installation token (apps/api/github_app.py) to use that
+    instead — `gh` honors `GH_TOKEN` over any locally stored auth.
     """
     argv = [
         "gh", "issue", "list",
@@ -30,8 +36,11 @@ def fetch_open_issues(repo_slug: str, *, limit: int = 100) -> list[dict[str, Any
         "--limit", str(limit),
         "--json", _FIELDS,
     ]
+    env = {**os.environ, "GH_TOKEN": token} if token else None
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=True)
+        result = subprocess.run(
+            argv, capture_output=True, text=True, timeout=30, check=True, env=env
+        )
     except FileNotFoundError as exc:
         raise GithubIssuesError("GitHub CLI (gh) is not on PATH — install it and run gh auth login") from exc
     except subprocess.TimeoutExpired as exc:

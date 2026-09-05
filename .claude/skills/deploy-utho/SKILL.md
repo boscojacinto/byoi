@@ -146,9 +146,16 @@ CA, an operator password, or any Claude account:
 rsync -av --delete \
   --exclude .git --exclude .venv --exclude '**/node_modules' \
   --exclude '**/__pycache__' --exclude .pytest_cache --exclude data \
+  --exclude '.claude/worktrees' --exclude '.claude/jobs' --exclude '.claude/shell-snapshots' \
   ./ root@"$IP":/opt/byoi/
 scp deploy/.env root@"$IP":/opt/byoi/deploy/.env
 ```
+
+`.claude/worktrees` can hold full duplicate checkouts from other in-progress
+sessions — without the exclude, a redeploy silently ships them to the VM.
+`--delete` only removes what the exclude list lets it see, so a worktree
+already rsynced up before this exclude existed has to be cleaned up by hand
+(`ssh root@"$IP" 'rm -rf /opt/byoi/.claude/worktrees'`).
 
 State moves one of two ways:
 
@@ -212,6 +219,13 @@ are containers the desk owns; free them from the desk first.
 not exist in the local source tree, and the command uses `--delete`. Re-run
 the `scp deploy/.env root@"$IP":/opt/byoi/deploy/.env` from step 5 immediately
 after every redeploy rsync, day two included — not just the first time.
+
+If the deploying checkout has no local `deploy/.env` at all (a fresh clone, a
+different machine than the one that first deployed) there is nothing to scp —
+add `--exclude 'deploy/.env'` to the rsync instead, so `--delete` never sees it
+and the VM's live copy (the one with the real domain and DNS token) survives
+untouched. Confirm which case you're in — `ls deploy/.env` locally — before
+running the rsync, not after.
 
 ## Teardown
 

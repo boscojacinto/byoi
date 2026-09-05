@@ -6,6 +6,9 @@
 #   ./scripts/salon-secrets.sh vercel
 #   ./scripts/salon-secrets.sh neon
 #   ./scripts/salon-secrets.sh upstash
+#   ./scripts/salon-secrets.sh github-app   # only for carrying one over manually —
+#                                            # normally created from the desk's
+#                                            # Projects tab ("Set up GitHub App")
 #   ./scripts/salon-secrets.sh --list
 #
 # The value is read from the terminal, never from an argument.
@@ -84,6 +87,26 @@ OPPY
     printf '%s' "$email" > "$DIR/upstash.email"; chmod 600 "$DIR/upstash.email"
     write_secret upstash.token "Upstash API key (console.upstash.com/account/api)"
     ;;
+  github-app)
+    # A GitHub App is normally created from the desk UI itself (Projects tab
+    # → "Set up GitHub App"), which stores these automatically. This exists
+    # only to carry an existing App's credentials to a second salon by hand.
+    mkdir -p "$DIR"; chmod 700 "$DIR"
+    printf 'GitHub App ID: ' >&2
+    read -r app_id
+    if [[ -z "$app_id" ]]; then
+      echo "nothing entered; github-app unchanged" >&2
+      exit 1
+    fi
+    printf 'GitHub App slug (from its settings URL): ' >&2
+    read -r app_slug
+    printf '%s' "$app_id" > "$DIR/github-app.id"; chmod 600 "$DIR/github-app.id"
+    [[ -n "$app_slug" ]] && { printf '%s' "$app_slug" > "$DIR/github-app.slug"; chmod 600 "$DIR/github-app.slug"; }
+    echo "Paste the App's private key PEM, then press Ctrl-D:" >&2
+    cat > "$DIR/github-app.pem"
+    chmod 600 "$DIR/github-app.pem"
+    echo "wrote $DIR/github-app.{id,slug,pem}" >&2
+    ;;
   --list|"")
     python3 - <<'PY'
 import json, sys
@@ -101,7 +124,7 @@ for row in status():
 PY
     ;;
   *)
-    echo "usage: $0 [operator|print-relay|vercel|neon|upstash|--list]" >&2
+    echo "usage: $0 [operator|print-relay|vercel|neon|upstash|github-app|--list]" >&2
     exit 2
     ;;
 esac

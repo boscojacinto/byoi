@@ -532,6 +532,15 @@ to be able to push there:
 desk falls back to the seat-side verifier and the report says which of the two
 fixes applies.
 
+Solutions sourced from a project's open GitHub issues (`apps/api/github_issues.py`)
+are a separate concern from any of the above: rather than lean on a personal
+`gh auth login` on the desk process, the desk can own a GitHub App
+(`apps/api/github_app.py`) that mints its own short-lived, per-repo token.
+Set one up once from the desk's Projects tab ("Set up GitHub App", then "Link
+GitHub App to this repo" per project) — no PEM to download, GitHub hands the
+credentials straight back via the manifest flow. Without one, issue sync
+still falls back to whatever `gh auth login` the desk has, same as before.
+
 The suite runs in **Docker** with `--network none`, a pids/memory/CPU cap, and an
 environment scrubbed of every `BYOI_*` value — guest code never sees `host.token`
 or `data/tls/`. Runs land in `data/verify-runs/<session>/`.

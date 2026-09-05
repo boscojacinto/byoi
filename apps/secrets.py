@@ -27,6 +27,12 @@ SECRETS: dict[str, str] = {
     # Lets the venue's printer agent claim slips. Desk-only for the same
     # reason the rest are: the seat runs guest code.
     "BYOI_PRINT_RELAY_TOKEN": "print-relay.token",
+    # A GitHub App the desk uses to mint its own short-lived, per-repo tokens
+    # for Solutions sync — see apps/api/github_app.py. Replaces relying on
+    # whatever personal `gh auth login` the host machine happens to have.
+    "BYOI_GITHUB_APP_ID": "github-app.id",
+    "BYOI_GITHUB_APP_SLUG": "github-app.slug",
+    "BYOI_GITHUB_APP_PRIVATE_KEY": "github-app.pem",
 }
 
 
@@ -106,6 +112,36 @@ def read_secret(name: str) -> str | None:
     if managed:
         return managed
     return dotenv_values().get(name, "").strip() or None
+
+
+def read_secret_full(name: str) -> str | None:
+    """Like ``read_secret``, but keeps every line — for a multi-line secret
+    (a PEM private key) where ``read_secret``'s first-line-only file read
+    would truncate it."""
+    env = os.environ.get(name, "")
+    if env.strip():
+        return env
+    path = secret_file(name)
+    if path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return text if text.strip() else None
+    value = dotenv_values().get(name, "")
+    return value if value.strip() else None
+
+
+def write_secret_file(name: str, content: str) -> Path:
+    """Write a secret's full content to its managed file (0600), creating
+    ``data/secrets/`` (0700) if needed. Used where the value comes from a
+    server-side flow rather than an operator typing it in."""
+    path = secret_file(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o600)
+    return path
 
 
 def source_of(name: str) -> str | None:

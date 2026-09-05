@@ -98,7 +98,7 @@ def _no_real_gh_issues(monkeypatch):
     test that touches the board. Tests exercising sync behavior on purpose
     monkeypatch this back to something fake.
     """
-    def _blocked(repo_slug, *, limit=100):
+    def _blocked(repo_slug, *, limit=100, token=None):
         raise github_issues.GithubIssuesError("gh issue list stubbed off in tests")
 
     monkeypatch.setattr("apps.api.github_issues.fetch_open_issues", _blocked)
