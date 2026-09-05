@@ -36,6 +36,7 @@ function hideSignIn() {
 
 const jsonHeaders = { "Content-Type": "application/json" };
 let projects = [];
+let githubApp = { configured: false, slug: null };
 let livePick = "";
 let lastPane = "floor";
 
@@ -88,6 +89,30 @@ function fillProjectSelect(selected) {
   sel.innerHTML =
     `<option value="">Project</option>` +
     projects.map((p) => `<option value="${p.id}" ${p.id === current ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
+}
+
+function updateGithubAppButton() {
+  const btn = $("githubAppBtn");
+  if (!btn) return;
+  if (!githubApp.configured) {
+    btn.textContent = "Set up GitHub App";
+    btn.disabled = false;
+    return;
+  }
+  const id = $("projectSel") ? $("projectSel").value : "";
+  const proj = projects.find((p) => p.id === id);
+  if (!proj) {
+    btn.textContent = "Link GitHub App";
+    btn.disabled = true; // pick a project first
+    return;
+  }
+  if (proj.github_installation_id) {
+    btn.textContent = "GitHub App linked ✓";
+    btn.disabled = true;
+  } else {
+    btn.textContent = "Link GitHub App to this repo";
+    btn.disabled = false;
+  }
 }
 
 
@@ -739,7 +764,7 @@ function boardGroupsHTML(items, occ) {
 }
 
 async function refresh() {
-  const [{ seats }, { items }, proj, tpl, health, accounts, live] = await Promise.all([
+  const [{ seats }, { items }, proj, tpl, health, accounts, live, ghApp] = await Promise.all([
     api("/api/seats"),
     api("/api/board"),
     api("/api/projects").catch(() => ({ projects: [] })),
@@ -747,9 +772,12 @@ async function refresh() {
     api("/api/health").catch(() => ({ ok: false })),
     api("/api/claude-accounts").catch(() => ({ accounts: [] })),
     api("/api/live").catch(() => ({ sessions: [] })),
+    api("/api/github/app").catch(() => ({ configured: false, slug: null })),
   ]);
   projects = proj.projects || [];
+  githubApp = ghApp;
   fillProjectSelect();
+  updateGithubAppButton();
   fillTemplateSelect(tpl.templates || []);
 
   const occ = seats.filter((s) => s.session);
@@ -964,6 +992,29 @@ $("syncIssues").addEventListener("click", async () => {
     const res = await api(`/api/projects/${id}/sync-issues`, { method: "POST", headers: jsonHeaders });
     msg.textContent = `Synced: ${res.added} added, ${res.updated} updated, ${res.removed} closed.`;
     await refresh();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+$("projectSel").addEventListener("change", updateGithubAppButton);
+
+$("githubAppBtn").addEventListener("click", async () => {
+  const msg = $("fetchMsg");
+  if (!githubApp.configured) {
+    // Full-page navigation: this lands on an auto-submitting form to
+    // GitHub's manifest flow, which only works as a top-level request.
+    window.location.href = "/api/github/app/new";
+    return;
+  }
+  const id = $("projectSel").value;
+  if (!id) {
+    msg.textContent = "Pick a project first.";
+    return;
+  }
+  try {
+    const res = await api(`/api/projects/${id}/github-app-install-url`);
+    window.location.href = res.url;
   } catch (err) {
     msg.textContent = err.message;
   }

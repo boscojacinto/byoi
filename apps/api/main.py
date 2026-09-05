@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import ssl
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from html import escape as html_escape
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -28,6 +31,7 @@ from apps.secrets import read_secret
 
 from . import caddy
 from . import deploy as deploy_ops
+from . import github_app
 from . import github_issues
 from . import guest_report
 from . import infra as desk_infra
@@ -41,7 +45,15 @@ from .printing import print_slip
 from .deploy import DeployError
 from .seat_sync import SeatSyncError
 from .testgen import TestgenError
-from .slips import WIFI_SSID, compose_checkin_slip, public_base, public_host, save_join_qr, seat_join_url
+from .slips import (
+    WIFI_SSID,
+    compose_checkin_slip,
+    join_base,
+    public_base,
+    public_host,
+    save_join_qr,
+    seat_join_url,
+)
 from .store import ProjectBusy, Store
 
 log = logging.getLogger("uvicorn.error")
@@ -142,10 +154,35 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return None
         if not force and time.time() - _issue_sync_at.get(project_id, 0.0) < ISSUE_SYNC_TTL:
             return None
-        issues = github_issues.fetch_open_issues(slug)
+        issues = github_issues.fetch_open_issues(slug, token=_app_token_for(project, slug))
         result = store.sync_board_issues(project_id, issues)
         _issue_sync_at[project_id] = time.time()
         return result
+
+    def _app_token_for(project: dict, slug: str) -> str | None:
+        """A GitHub App installation token for this project's repo, if the
+        desk has an App configured and it's installed there. None falls back
+        to whatever `gh auth login` the desk process already has — so a
+        project that hasn't been linked to the App yet still works exactly
+        as it did before the App existed.
+        """
+        if not github_app.configured():
+            return None
+        installation_id = project.get("github_installation_id")
+        if installation_id is None:
+            try:
+                installation_id = github_app.installation_id_for(slug)
+            except github_app.GithubAppError as exc:
+                log.warning("BYOI: GitHub App lookup failed for %s: %s", slug, exc)
+                return None
+            if installation_id is None:
+                return None
+            store.set_project_installation(project["id"], installation_id)
+        try:
+            return github_app.installation_token(installation_id)
+        except github_app.GithubAppError as exc:
+            log.warning("BYOI: could not mint an installation token for %s: %s", slug, exc)
+            return None
 
     def sync_all_github_projects() -> None:
         """Best-effort refresh before the board is read — a `gh` failure (not
@@ -321,6 +358,87 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if result is None:
             raise HTTPException(400, "this project's origin is not a GitHub repo")
         return {"project_id": project_id, **result}
+
+    @app.get("/api/github/app")
+    def github_app_status() -> dict:
+        return {"configured": github_app.configured(), "slug": github_app.slug()}
+
+    @app.get("/api/github/app/new")
+    def github_app_new(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> HTMLResponse:
+        """A one-click "Create GitHub App" page: an auto-submitting form to
+        GitHub's manifest-flow endpoint, pre-filled so the operator's only
+        action is clicking Create — GitHub mints the id, slug, and private
+        key itself and hands them back to /api/github/app/created."""
+        require_operator(request, authorization)
+        base = join_base()
+        domain = urlparse(base).hostname or "byoi-salon"
+        manifest = {
+            "name": f"BYOI Solutions sync ({domain})",
+            "url": base,
+            "hook_attributes": {"url": f"{base}/api/github/app/hook", "active": False},
+            "redirect_url": f"{base}/api/github/app/created",
+            "setup_url": f"{base}/api/github/app/setup",
+            "setup_on_update": True,
+            "public": False,
+            "default_permissions": {"issues": "read", "metadata": "read"},
+            "default_events": [],
+        }
+        manifest_value = html_escape(json.dumps(manifest), quote=True)
+        html = f"""<!doctype html><html><body>
+<form id="ghAppManifest" action="https://github.com/settings/apps/new" method="post">
+<input type="hidden" name="manifest" value="{manifest_value}">
+</form>
+<script>document.getElementById('ghAppManifest').submit()</script>
+</body></html>"""
+        return HTMLResponse(html)
+
+    @app.get("/api/github/app/created")
+    def github_app_created(
+        request: Request, code: str, authorization: str | None = Header(default=None)
+    ) -> Response:
+        """Where GitHub's manifest flow redirects after the operator clicks
+        Create — trades the one-time code for real credentials and stores
+        them, then sends the operator back to the desk."""
+        require_operator(request, authorization)
+        try:
+            data = github_app.convert_manifest_code(code)
+        except github_app.GithubAppError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        github_app.store_credentials(data)
+        return RedirectResponse(url="/host/", status_code=303)
+
+    @app.get("/api/github/app/setup")
+    def github_app_setup(
+        request: Request,
+        installation_id: int,
+        state: str | None = None,
+        setup_action: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        """Where GitHub sends the operator back after installing (or
+        updating) the App on a repo. `state` carries the project id we asked
+        for in the install link, so this is what actually links the two."""
+        require_operator(request, authorization)
+        if state:
+            try:
+                store.set_project_installation(state, installation_id)
+            except KeyError:
+                pass
+        return RedirectResponse(url="/host/", status_code=303)
+
+    @app.get("/api/projects/{project_id}/github-app-install-url")
+    def github_app_install_url(
+        request: Request, project_id: str, authorization: str | None = Header(default=None)
+    ) -> dict:
+        require_operator(request, authorization)
+        if not store.project(project_id):
+            raise HTTPException(404, "unknown project")
+        app_slug = github_app.slug()
+        if not app_slug:
+            raise HTTPException(400, "no GitHub App configured yet")
+        return {"url": f"https://github.com/apps/{app_slug}/installations/new?state={project_id}"}
 
     @app.get("/api/templates")
     def get_templates() -> dict:

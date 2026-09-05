@@ -47,7 +47,11 @@ CREATE TABLE IF NOT EXISTS projects (
     -- deploys, same shape as deployments.resources. Kept across guests and
     -- sessions so the data a guest's app writes is still there for whoever
     -- deploys this project next.
-    infra_resources TEXT NOT NULL DEFAULT '[]'
+    infra_resources TEXT NOT NULL DEFAULT '[]',
+    -- Set once the operator installs the desk's GitHub App on this project's
+    -- repo, so later syncs mint a scoped installation token instead of
+    -- falling back to whatever `gh auth login` the desk process has.
+    github_installation_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS board (
     id TEXT PRIMARY KEY,
@@ -159,6 +163,8 @@ class Store:
             self.conn.execute(
                 "ALTER TABLE projects ADD COLUMN infra_resources TEXT NOT NULL DEFAULT '[]'"
             )
+        if "github_installation_id" not in proj_cols:
+            self.conn.execute("ALTER TABLE projects ADD COLUMN github_installation_id INTEGER")
         sess_cols = self._columns("sessions")
         if "test_status" not in sess_cols:
             self.conn.execute("ALTER TABLE sessions ADD COLUMN test_status TEXT")
@@ -411,6 +417,16 @@ class Store:
         self.conn.execute(
             "UPDATE projects SET infra_resources=? WHERE id=?",
             (json.dumps(resources), project_id),
+        )
+        self.conn.commit()
+
+    def set_project_installation(self, project_id: str, installation_id: int) -> None:
+        """Record which GitHub App installation covers this project's repo."""
+        if not self.project(project_id):
+            raise KeyError("unknown project")
+        self.conn.execute(
+            "UPDATE projects SET github_installation_id=? WHERE id=?",
+            (installation_id, project_id),
         )
         self.conn.commit()
 
