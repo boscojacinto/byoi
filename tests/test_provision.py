@@ -673,7 +673,8 @@ def test_claiming_in_the_cloud_sends_the_seat_its_own_path(tmp_path, monkeypatch
         "/api/projects", json={"kind": "local", "path": str(project), "name": "todo-api"}
     ).json()
     brief = desk.post(
-        "/api/board", json={"title": "Ship it", "brief": "b", "project_id": made["id"]}
+        "/api/board",
+        json={"title": "Ship it", "brief": "b", "spec": "- works", "project_id": made["id"]},
     ).json()
     sid = desk.post(
         "/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}
@@ -702,7 +703,8 @@ def test_claiming_on_one_pc_still_opens_the_project_itself(tmp_path, monkeypatch
         "/api/projects", json={"kind": "local", "path": str(project), "name": "todo-api"}
     ).json()
     brief = desk.post(
-        "/api/board", json={"title": "Ship it", "brief": "b", "project_id": made["id"]}
+        "/api/board",
+        json={"title": "Ship it", "brief": "b", "spec": "- works", "project_id": made["id"]},
     ).json()
     sid = desk.post(
         "/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}

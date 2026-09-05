@@ -77,10 +77,16 @@ nav { display: flex; gap: 0.15rem; margin-left: auto; }
   border-radius: 0;
 }
 .tab:hover, .text:hover { color: var(--neon); }
-.tab.is-on {
+.tab.is-on, .text.is-on {
   color: var(--neon);
   border-bottom-color: var(--neon);
   text-shadow: 0 0 12px rgba(61, 255, 138, 0.4);
+}
+#addModeToggle {
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.4rem;
 }
 .cta {
   background: transparent;

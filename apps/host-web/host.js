@@ -91,28 +91,38 @@ function fillProjectSelect(selected) {
     projects.map((p) => `<option value="${p.id}" ${p.id === current ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("");
 }
 
-function updateGithubAppButton() {
-  const btn = $("githubAppBtn");
-  if (!btn) return;
+// A github.com remote, not any git host — mirrors projects.github_repo_slug.
+function isGithubProject(project) {
+  return /github\.com[:/]/.test((project && project.github) || "");
+}
+
+// Only offered right after a *new* project is created (see the newProject
+// submit handler) — an existing project's GitHub App link, if any, was
+// already made when that project was first created.
+async function maybeOfferGithubAppLink(project) {
+  if (!isGithubProject(project)) return;
+  const msg = $("githubAppModalMsg");
+  const action = $("githubAppModalAction");
   if (!githubApp.configured) {
-    btn.textContent = "Set up GitHub App";
-    btn.disabled = false;
-    return;
-  }
-  const id = $("projectSel") ? $("projectSel").value : "";
-  const proj = projects.find((p) => p.id === id);
-  if (!proj) {
-    btn.textContent = "Link GitHub App";
-    btn.disabled = true; // pick a project first
-    return;
-  }
-  if (proj.github_installation_id) {
-    btn.textContent = "GitHub App linked ✓";
-    btn.disabled = true;
+    msg.textContent =
+      "Set up the desk's GitHub App once so this project's issues sync into Solutions automatically.";
+    action.textContent = "Set up GitHub App";
+    action.onclick = () => {
+      window.location.href = "/api/github/app/new";
+    };
   } else {
-    btn.textContent = "Link GitHub App to this repo";
-    btn.disabled = false;
+    msg.textContent = `Install the GitHub App on ${project.name} so its issues sync automatically.`;
+    action.textContent = "Link GitHub App to this repo";
+    action.onclick = async () => {
+      try {
+        const res = await api(`/api/projects/${project.id}/github-app-install-url`);
+        window.location.href = res.url;
+      } catch (err) {
+        msg.textContent = err.message;
+      }
+    };
   }
+  openModal("githubAppModal");
 }
 
 
@@ -127,6 +137,10 @@ function showPane(name) {
     refreshQABriefs().catch(() => {});
     refreshQAGrading().catch(() => {});
   }
+  // GitHub sync happens here — on demand, every time the tab opens — and
+  // nowhere else. It used to ride the 8s poll in refresh(), syncing every
+  // GitHub-linked project on a timer regardless of which tab was open.
+  if (name === "solutions") refreshSolutions().catch(() => {});
 }
 
 function openModal(id) {
@@ -763,10 +777,23 @@ function boardGroupsHTML(items, occ) {
   return projectBlocks + soloRows;
 }
 
+// Solutions are the one thing on this desk backed by a live GitHub sync, so
+// they get their own on-demand refresh (called from showPane) instead of
+// riding the 8s poll below — see the comment in showPane.
+async function refreshSolutions() {
+  $("board").innerHTML = `<p class="quiet">Syncing GitHub issues…</p>`;
+  try {
+    const [{ items }, { seats }] = await Promise.all([api("/api/board"), api("/api/seats")]);
+    const occ = seats.filter((s) => s.session);
+    $("board").innerHTML = boardGroupsHTML(items, occ) || `<p class="quiet">No solutions yet.</p>`;
+  } catch (err) {
+    $("board").innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
+  }
+}
+
 async function refresh() {
-  const [{ seats }, { items }, proj, tpl, health, accounts, live, ghApp] = await Promise.all([
+  const [{ seats }, proj, tpl, health, accounts, live, ghApp] = await Promise.all([
     api("/api/seats"),
-    api("/api/board"),
     api("/api/projects").catch(() => ({ projects: [] })),
     api("/api/templates").catch(() => ({ templates: [] })),
     api("/api/health").catch(() => ({ ok: false })),
@@ -777,7 +804,6 @@ async function refresh() {
   projects = proj.projects || [];
   githubApp = ghApp;
   fillProjectSelect();
-  updateGithubAppButton();
   fillTemplateSelect(tpl.templates || []);
 
   const occ = seats.filter((s) => s.session);
@@ -851,8 +877,6 @@ async function refresh() {
     };
   });
 
-  $("board").innerHTML = boardGroupsHTML(items, occ) || `<p class="quiet">No solutions yet.</p>`;
-
   const sel = $("seatSel");
   sel.innerHTML = open.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("");
   const msg = $("checkinMsg");
@@ -901,10 +925,45 @@ document.querySelectorAll("[data-usage-group]").forEach((btn) => {
   };
 });
 
-$("openAdd").onclick = () => openModal("addDrawer");
+function resetAddDrawer() {
+  document.querySelectorAll("#addModeToggle [data-mode]").forEach((b) => b.classList.toggle("is-on", b.dataset.mode === "existing"));
+  $("existingProjectMode").hidden = false;
+  $("newProject").hidden = true;
+  $("newBrief").hidden = true;
+  $("projectSel").value = "";
+  $("briefProjectId").value = "";
+  $("projectSyncMsg").textContent = "";
+  $("suggestMsg").textContent = "";
+  $("briefMsg").textContent = "";
+  $("projectMsg").textContent = "";
+  $("newBrief").reset();
+}
+
+$("openAdd").onclick = () => {
+  resetAddDrawer();
+  openModal("addDrawer");
+};
 $("closeAdd").onclick = () => closeModal("addDrawer");
 $("addDrawer").addEventListener("click", (ev) => {
   if (ev.target.id === "addDrawer") closeModal("addDrawer");
+});
+
+document.querySelectorAll("#addModeToggle [data-mode]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#addModeToggle [data-mode]").forEach((b) => b.classList.toggle("is-on", b === btn));
+    const mode = btn.getAttribute("data-mode");
+    $("existingProjectMode").hidden = mode !== "existing";
+    $("newProject").hidden = mode !== "new";
+    // Switching modes means picking or creating a project again.
+    $("newBrief").hidden = true;
+    $("projectSel").value = "";
+    $("briefProjectId").value = "";
+  });
+});
+
+$("closeGithubAppModal").onclick = () => closeModal("githubAppModal");
+$("githubAppModal").addEventListener("click", (ev) => {
+  if (ev.target.id === "githubAppModal") closeModal("githubAppModal");
 });
 
 $("checkin").addEventListener("submit", async (ev) => {
@@ -935,24 +994,57 @@ $("checkin").addEventListener("submit", async (ev) => {
   }
 });
 
+$("newBrief").querySelector('[name="title"]').addEventListener("blur", async (ev) => {
+  const title = ev.target.value.trim();
+  const projectId = $("briefProjectId").value;
+  const briefField = $("newBrief").querySelector('[name="brief"]');
+  const specField = $("newBrief").querySelector('[name="spec"]');
+  const minutesField = $("newBrief").querySelector('[name="wellness_minutes"]');
+  const breakField = $("newBrief").querySelector('[name="break_after"]');
+  const msg = $("suggestMsg");
+  if (!title || !projectId) return;
+  // Never clobber something the host already started writing by hand.
+  if (briefField.value.trim() || specField.value.trim()) return;
+  msg.textContent = "Claude is drafting a brief from the repo…";
+  try {
+    const suggestion = await api("/api/board/suggest", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ title, project_id: projectId }),
+    });
+    briefField.value = suggestion.brief;
+    specField.value = suggestion.spec;
+    minutesField.value = suggestion.wellness_minutes;
+    breakField.value = suggestion.break_after;
+    msg.textContent = "Suggested by Claude — edit anything before adding.";
+  } catch (err) {
+    msg.textContent = `Could not draft a suggestion (${err.message}) — fill these in by hand.`;
+  }
+});
+
 $("newBrief").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);
-  await api("/api/board", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify({
-      title: fd.get("title"),
-      brief: fd.get("brief"),
-      wellness_minutes: Number(fd.get("wellness_minutes")),
-      break_after: Number(fd.get("break_after")),
-      project_id: fd.get("project_id") || null,
-      spec: fd.get("spec") || "",
-    }),
-  });
-  ev.target.reset();
-  closeModal("addDrawer");
-  await refresh();
+  const msg = $("briefMsg");
+  try {
+    await api("/api/board", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        title: fd.get("title"),
+        brief: fd.get("brief"),
+        wellness_minutes: Number(fd.get("wellness_minutes")),
+        break_after: Number(fd.get("break_after")),
+        project_id: fd.get("project_id") || null,
+        spec: fd.get("spec"),
+      }),
+    });
+    closeModal("addDrawer");
+    resetAddDrawer();
+    await refreshSolutions();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
 });
 
 $("freeAll").addEventListener("click", async () => {
@@ -964,59 +1056,25 @@ $("freeAll").addEventListener("click", async () => {
   }
 });
 
-$("fetchProject").addEventListener("click", async () => {
+// Picking an existing project syncs its GitHub issues right away — no
+// separate "Fetch repo" / "Sync GitHub issues" buttons to click. A project
+// that isn't GitHub-backed 400s here, which just means there's nothing to
+// sync, not a real failure.
+$("projectSel").addEventListener("change", async () => {
   const id = $("projectSel").value;
-  const msg = $("fetchMsg");
+  const syncMsg = $("projectSyncMsg");
   if (!id) {
-    msg.textContent = "Pick a project first.";
+    $("newBrief").hidden = true;
     return;
   }
-  msg.textContent = "Cloning…";
-  try {
-    const res = await api(`/api/projects/${id}/fetch`, { method: "POST", headers: jsonHeaders });
-    msg.textContent = `Ready at ${res.local_path}`;
-  } catch (err) {
-    msg.textContent = err.message;
-  }
-});
-
-$("syncIssues").addEventListener("click", async () => {
-  const id = $("projectSel").value;
-  const msg = $("fetchMsg");
-  if (!id) {
-    msg.textContent = "Pick a project first.";
-    return;
-  }
-  msg.textContent = "Syncing GitHub issues…";
+  $("briefProjectId").value = id;
+  $("newBrief").hidden = false;
+  syncMsg.textContent = "Syncing GitHub issues…";
   try {
     const res = await api(`/api/projects/${id}/sync-issues`, { method: "POST", headers: jsonHeaders });
-    msg.textContent = `Synced: ${res.added} added, ${res.updated} updated, ${res.removed} closed.`;
-    await refresh();
+    syncMsg.textContent = `Synced: ${res.added} added, ${res.updated} updated, ${res.removed} closed.`;
   } catch (err) {
-    msg.textContent = err.message;
-  }
-});
-
-$("projectSel").addEventListener("change", updateGithubAppButton);
-
-$("githubAppBtn").addEventListener("click", async () => {
-  const msg = $("fetchMsg");
-  if (!githubApp.configured) {
-    // Full-page navigation: this lands on an auto-submitting form to
-    // GitHub's manifest flow, which only works as a top-level request.
-    window.location.href = "/api/github/app/new";
-    return;
-  }
-  const id = $("projectSel").value;
-  if (!id) {
-    msg.textContent = "Pick a project first.";
-    return;
-  }
-  try {
-    const res = await api(`/api/projects/${id}/github-app-install-url`);
-    window.location.href = res.url;
-  } catch (err) {
-    msg.textContent = err.message;
+    syncMsg.textContent = err.message.includes("not a GitHub repo") ? "" : err.message;
   }
 });
 
@@ -1048,8 +1106,11 @@ $("newProject").addEventListener("submit", async (ev) => {
     ev.target.reset();
     ev.target.querySelector('[name="kind"][value="github"]').checked = true;
     updateProjectKindFields();
-    await refresh();
+    projects.push(created);
     fillProjectSelect(created.id);
+    $("briefProjectId").value = created.id;
+    $("newBrief").hidden = false;
+    await maybeOfferGithubAppLink(created);
   } catch (err) {
     msg.textContent = err.message;
   }
