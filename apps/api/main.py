@@ -374,8 +374,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         require_operator(request, authorization)
         base = join_base()
         domain = urlparse(base).hostname or "byoi-salon"
+        # GitHub caps App names at 34 characters — a plain domain like
+        # "salon.aipilots.online" already leaves little room to spare.
+        app_name = f"BYOI sync ({domain})"[:34]
         manifest = {
-            "name": f"BYOI Solutions sync ({domain})",
+            "name": app_name,
             "url": base,
             "hook_attributes": {"url": f"{base}/api/github/app/hook", "active": False},
             "redirect_url": f"{base}/api/github/app/created",
