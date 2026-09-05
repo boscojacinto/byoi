@@ -39,6 +39,8 @@ let projects = [];
 let githubApp = { configured: false, slug: null };
 let livePick = "";
 let lastPane = "floor";
+let openSpecId = null;
+let openGradingId = null;
 
 function $(id) {
   return document.getElementById(id);
@@ -313,20 +315,96 @@ function testBadge(status) {
   return `<span class="badge ${cls}">${label}</span>`;
 }
 
+// Collapsed to one line by default so a whole project's worth of briefs or
+// results fits on screen; opening one closes any other open in the same
+// list, so the open item gets the pane's full height instead of a cramped
+// fixed-size box (see .qa-item[open] textarea in salon.css).
+function wireAccordion(container, getOpenId, setOpenId) {
+  container.querySelectorAll("details.qa-item").forEach((det) => {
+    det.addEventListener("toggle", () => {
+      const id = det.getAttribute("data-id");
+      if (det.open) {
+        container.querySelectorAll("details.qa-item[open]").forEach((other) => {
+          if (other !== det) other.open = false;
+        });
+        setOpenId(id);
+      } else if (getOpenId() === id) {
+        setOpenId(null);
+      }
+    });
+  });
+}
+
+function specPreview(spec) {
+  const line = (spec || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .find(Boolean);
+  return line || "No spec yet — tap to add plain-English facts.";
+}
+
+function occupantBadge(item, occ) {
+  const seat = occ.find((s) => s.session.board_id === item.id);
+  if (!seat) return "";
+  return `<span class="badge is-running">${escapeHtml(seat.session.coder_name)} · ${escapeHtml(seat.name)}</span>`;
+}
+
+function specItemHTML(item, occ) {
+  return `<details class="qa-item" data-id="${item.id}" ${item.id === openSpecId ? "open" : ""}>
+    <summary>
+      <strong>${escapeHtml(item.title)}</strong>
+      ${occupantBadge(item, occ)}
+      <p class="quiet qa-item-preview">${escapeHtml(specPreview(item.spec))}</p>
+    </summary>
+    <form class="qaSpecForm" data-brief="${item.id}">
+      <textarea name="spec" placeholder="Plain-English facts, one per line (optional)">${escapeHtml(item.spec || "")}</textarea>
+      <div class="row"><button type="submit">Save</button></div>
+    </form>
+  </details>`;
+}
+
+// Briefs belong to a project the same way Solutions does (boardGroupsHTML) —
+// grouping them the same way here means "which project is this for" reads
+// the same across both tabs.
+function qaBriefGroupsHTML(items, occ) {
+  const groups = new Map();
+  const solo = [];
+  for (const item of items) {
+    if (!item.project) {
+      solo.push(item);
+      continue;
+    }
+    const key = item.project.id;
+    if (!groups.has(key)) groups.set(key, { project: item.project, busy: !!item.project_busy, items: [] });
+    groups.get(key).items.push(item);
+  }
+  const projectBlocks = [...groups.values()]
+    .map((group) => {
+      const count = group.items.length;
+      return `<div class="q-group${group.busy ? " busy" : ""}">
+        <div class="q-group-head">
+          <strong>${escapeHtml(group.project.name)}</strong>
+          <span class="quiet">${count} brief${count === 1 ? "" : "s"}${group.busy ? " · in progress" : ""}</span>
+        </div>
+        ${group.items.map((item) => specItemHTML(item, occ)).join("")}
+      </div>`;
+    })
+    .join("");
+  const soloBlock = solo.length
+    ? `<div class="q-group">
+        <div class="q-group-head"><strong>No project</strong><span class="quiet">${solo.length} brief${solo.length === 1 ? "" : "s"}</span></div>
+        ${solo.map((item) => specItemHTML(item, occ)).join("")}
+      </div>`
+    : "";
+  return projectBlocks + soloBlock;
+}
+
 async function refreshQABriefs() {
-  const { items } = await api("/api/board");
+  const [{ items }, { seats }] = await Promise.all([api("/api/board"), api("/api/seats")]);
+  const occ = seats.filter((s) => s.session);
   $("qaBriefs").innerHTML =
-    items
-      .map(
-        (i) => `<article class="qa-item">
-        <div class="card-head"><strong>${escapeHtml(i.title)}</strong></div>
-        <form class="qaSpecForm" data-brief="${i.id}">
-          <textarea name="spec" placeholder="Plain-English facts, one per line (optional)">${escapeHtml(i.spec || "")}</textarea>
-          <div class="row"><button type="submit">Save</button></div>
-        </form>
-      </article>`
-      )
-      .join("") || `<p class="quiet">No briefs yet — add one from Solutions.</p>`;
+    qaBriefGroupsHTML(items, occ) || `<p class="quiet">No briefs yet — add one from Solutions.</p>`;
+  wireAccordion($("qaBriefs"), () => openSpecId, (id) => (openSpecId = id));
   $("qaBriefs")
     .querySelectorAll(".qaSpecForm")
     .forEach((form) => {
@@ -354,36 +432,76 @@ async function refreshQABriefs() {
     });
 }
 
+function gradingHeading(status, report) {
+  if (status === "running") return "Testing against the spec…";
+  if (status === "passed") return `${report.passed ?? 0} passed`;
+  return `${report.failed ?? 0} failed · ${report.passed ?? 0} passed`;
+}
+
+// Rebuilds a filter <select>'s options from live data while keeping whatever
+// the operator already picked selected — same trick as fillProjectSelect —
+// so re-polling every few seconds doesn't reset an in-progress filter.
+function fillFilterSelect(sel, options, allLabel) {
+  const current = sel.value;
+  sel.innerHTML =
+    `<option value="">${allLabel}</option>` +
+    options
+      .map((o) => `<option value="${escapeHtml(o.value)}" ${o.value === current ? "selected" : ""}>${escapeHtml(o.label)}</option>`)
+      .join("");
+  if (options.some((o) => o.value === current)) sel.value = current;
+}
+
 async function refreshQAGrading() {
-  let sessions;
+  let sessions, items;
   try {
-    ({ sessions } = await api("/api/sessions/grading"));
+    [{ sessions }, { items }] = await Promise.all([api("/api/sessions/grading"), api("/api/board")]);
   } catch (err) {
     $("qaGrading").innerHTML = `<p class="quiet">${escapeHtml(err.message)}</p>`;
     return;
   }
+  const projectByBoard = new Map(items.filter((i) => i.project).map((i) => [i.id, i.project]));
+
+  const projectOptions = [...new Map(items.filter((i) => i.project).map((i) => [i.project.id, i.project.name])).entries()].map(
+    ([value, label]) => ({ value, label })
+  );
+  fillFilterSelect($("qaFilterProject"), projectOptions, "All projects");
+  const guestOptions = [...new Set(sessions.map((s) => s.coder_name).filter(Boolean))]
+    .sort()
+    .map((g) => ({ value: g, label: g }));
+  fillFilterSelect($("qaFilterGuest"), guestOptions, "All guests");
+
+  const filterProject = $("qaFilterProject").value;
+  const filterGuest = $("qaFilterGuest").value;
+  const filterStatus = $("qaFilterStatus").value;
+
+  const filtered = sessions.filter((s) => {
+    if (filterStatus && (s.test_status || "running") !== filterStatus) return false;
+    if (filterGuest && s.coder_name !== filterGuest) return false;
+    if (filterProject && (projectByBoard.get(s.board_id) || {}).id !== filterProject) return false;
+    return true;
+  });
+
   $("qaGrading").innerHTML =
-    sessions
+    filtered
       .map((s) => {
         const report = s.test_report || {};
         const status = s.test_status || "running";
-        const heading =
-          status === "running"
-            ? "Testing against the spec…"
-            : status === "passed"
-              ? `${report.passed ?? 0} passed`
-              : `${report.failed ?? 0} failed · ${report.passed ?? 0} passed`;
-        return `<article class="qa-item">
-          <div class="card-head">
+        const proj = projectByBoard.get(s.board_id);
+        return `<details class="qa-item" data-id="${s.id}" ${s.id === openGradingId ? "open" : ""}>
+          <summary>
             <strong>${escapeHtml(s.coder_name)} · ${escapeHtml(s.brief_title || "untitled")}</strong>
             ${testBadge(status)}
-          </div>
-          <p class="quiet">${escapeHtml(s.seat_name || "")} · ${escapeHtml(heading)}</p>
+            <p class="quiet qa-item-preview">${escapeHtml(s.seat_name || "")}${proj ? ` · ${escapeHtml(proj.name)}` : ""} · ${escapeHtml(gradingHeading(status, report))}</p>
+          </summary>
           ${report.summary ? `<p class="quiet">${escapeHtml(report.summary)}</p>` : ""}
           <ul class="cases">${caseRows(report.cases) || (status === "running" ? "" : "<li>Nothing to report.</li>")}</ul>
-        </article>`;
+        </details>`;
       })
-      .join("") || `<p class="quiet">Nothing graded yet — results appear here once a guest taps “I’m done”.</p>`;
+      .join("") ||
+    `<p class="quiet">${
+      sessions.length ? "No results match these filters." : "Nothing graded yet — results appear here once a guest taps “I’m done”."
+    }</p>`;
+  wireAccordion($("qaGrading"), () => openGradingId, (id) => (openGradingId = id));
 }
 
 function formatResetTime(epoch) {
@@ -899,6 +1017,9 @@ async function refresh() {
 
 document.querySelectorAll("[data-pane]").forEach((btn) => {
   btn.onclick = () => showPane(btn.getAttribute("data-pane"));
+});
+["qaFilterProject", "qaFilterGuest", "qaFilterStatus"].forEach((id) => {
+  $(id).addEventListener("change", () => refreshQAGrading().catch(() => {}));
 });
 window.addEventListener("hashchange", () => showPane(location.hash.slice(1)));
 showPane(location.hash.slice(1) || "floor");

@@ -71,9 +71,9 @@
         <div class="card-head">
           <h2>Specs &amp; QA</h2>
         </div>
-        <p class="quiet">Plain-English facts each brief must satisfy. Saved here, an
-          agent on this desk turns them into a test suite the grader runs blind —
-          it never sees the guest's code, only the spec.</p>
+        <p class="quiet">Grouped by project, with who's sitting on each one. Tap a brief for the
+          full spec — plain-English facts an agent on this desk turns into a test suite the
+          grader runs blind, never seeing the guest's code.</p>
         <div id="qaBriefs" class="qa-list"></div>
       </article>
       <article class="card qa-grading">
@@ -81,6 +81,16 @@
           <h2>Grading results</h2>
         </div>
         <p class="quiet">Fills in the moment a guest taps <strong>I'm done</strong>.</p>
+        <div class="qa-filters">
+          <select id="qaFilterProject"><option value="">All projects</option></select>
+          <select id="qaFilterGuest"><option value="">All guests</option></select>
+          <select id="qaFilterStatus">
+            <option value="">All statuses</option>
+            <option value="running">Running</option>
+            <option value="passed">Passed</option>
+            <option value="failed">Failed</option>
+          </select>
+        </div>
         <div id="qaGrading" class="qa-list"></div>
       </article>
     </section>
