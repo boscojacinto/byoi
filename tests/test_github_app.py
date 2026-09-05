@@ -248,6 +248,22 @@ def test_github_app_new_returns_a_self_submitting_manifest_form(tmp_path: Path):
     assert "manifest" in res.text
 
 
+def test_github_app_new_name_fits_githubs_34_char_limit(tmp_path: Path, monkeypatch):
+    import html
+    import json
+    import re
+
+    # A real, unremarkable production domain — long enough that an unbounded
+    # "BYOI Solutions sync (<domain>)" template blows past GitHub's cap.
+    monkeypatch.setenv("BYOI_PUBLIC_BASE", "https://salon.aipilots.online")
+    desk = _desk(tmp_path)
+    res = desk.get("/api/github/app/new")
+    match = re.search(r'name="manifest" value="([^"]*)"', res.text)
+    assert match, "manifest hidden input not found"
+    manifest = json.loads(html.unescape(match.group(1)))
+    assert len(manifest["name"]) <= 34, manifest["name"]
+
+
 def test_github_app_created_exchanges_the_code_and_stores_credentials(tmp_path: Path, monkeypatch):
     def fake_post(url, *, headers, timeout):
         assert url.endswith("/app-manifests/xyz/conversions")

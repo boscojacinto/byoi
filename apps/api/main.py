@@ -374,8 +374,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         require_operator(request, authorization)
         base = join_base()
         domain = urlparse(base).hostname or "byoi-salon"
+        # GitHub caps App names at 34 characters — a plain domain like
+        # "salon.aipilots.online" already leaves little room to spare.
+        app_name = f"BYOI sync ({domain})"[:34]
         manifest = {
-            "name": f"BYOI Solutions sync ({domain})",
+            "name": app_name,
             "url": base,
             "hook_attributes": {"url": f"{base}/api/github/app/hook", "active": False},
             "redirect_url": f"{base}/api/github/app/created",
@@ -407,7 +410,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except github_app.GithubAppError as exc:
             raise HTTPException(502, str(exc)) from exc
         github_app.store_credentials(data)
-        return RedirectResponse(url="/host/", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/github/app/setup")
     def github_app_setup(
@@ -426,7 +429,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 store.set_project_installation(state, installation_id)
             except KeyError:
                 pass
-        return RedirectResponse(url="/host/", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/projects/{project_id}/github-app-install-url")
     def github_app_install_url(
