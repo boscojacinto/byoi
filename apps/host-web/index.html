@@ -146,6 +146,15 @@
           <button type="button" class="text" id="githubAppBtn">Set up GitHub App</button>
         </div>
         <p id="fetchMsg" class="quiet"></p>
+        <!-- Files the brief needs as inputs. They belong to the project, so a
+             later guest on the same project gets them too. -->
+        <div class="row">
+          <input type="file" id="mediaFile" multiple />
+          <input type="text" id="mediaRole" placeholder="What is it? (e.g. hero shot)" />
+          <button type="button" class="text" id="mediaUpload">Add media</button>
+        </div>
+        <p id="mediaMsg" class="quiet"></p>
+        <ul id="mediaList" class="quiet"></ul>
         <div class="row">
           <label>Minutes <input type="number" name="wellness_minutes" value="90" min="15" /></label>
           <label>Break <input type="number" name="break_after" value="50" min="10" /></label>

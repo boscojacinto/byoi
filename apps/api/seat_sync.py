@@ -86,11 +86,16 @@ def admit_session(seat: dict[str, Any], sess: dict[str, Any]) -> dict[str, Any]:
     return res.json() if res.content else {"ok": True}
 
 
-def set_workspace(seat: dict[str, Any] | None, path: str) -> dict[str, Any]:
+def set_workspace(
+    seat: dict[str, Any] | None, path: str, media_dir: str | None = None
+) -> dict[str, Any]:
     url = control_base(seat) + "/local/workspace"
+    body: dict[str, Any] = {"path": path}
+    if media_dir:
+        body["media_dir"] = media_dir
     try:
         with _client() as client:
-            res = client.post(url, json={"path": path}, headers=_headers())
+            res = client.post(url, json=body, headers=_headers())
     except httpx.HTTPError as exc:
         raise SeatSyncError(0, str(exc)) from exc
     if res.status_code >= 400:

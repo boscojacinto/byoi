@@ -997,7 +997,85 @@ $("syncIssues").addEventListener("click", async () => {
   }
 });
 
+// --- media a brief needs as an input ---------------------------------------
+//
+// Uploaded against the *project*, so the next guest on it gets the same files.
+// The bytes are the request body: the desk image carries no multipart parser
+// and this is the only client that ever calls the route.
+
+async function refreshMedia() {
+  const list = $("mediaList");
+  const id = $("projectSel") ? $("projectSel").value : "";
+  if (!list) return;
+  if (!id) {
+    list.innerHTML = "";
+    return;
+  }
+  try {
+    const res = await api(`/api/projects/${id}/media`);
+    if (!res.configured) {
+      list.innerHTML = "<li>Object storage is not set up on this salon.</li>";
+      return;
+    }
+    list.innerHTML = (res.media || [])
+      .map(
+        (m) =>
+          `<li>${escapeHtml(m.filename)}${m.role ? ` — ${escapeHtml(m.role)}` : ""} ` +
+          `<button type="button" class="text" data-media="${m.id}">remove</button></li>`,
+      )
+      .join("");
+  } catch (err) {
+    list.innerHTML = `<li>${escapeHtml(err.message)}</li>`;
+  }
+}
+
+$("mediaUpload").addEventListener("click", async () => {
+  const id = $("projectSel").value;
+  const msg = $("mediaMsg");
+  const picker = $("mediaFile");
+  if (!id) {
+    msg.textContent = "Pick a project first.";
+    return;
+  }
+  const files = Array.from(picker.files || []);
+  if (!files.length) {
+    msg.textContent = "Choose a file first.";
+    return;
+  }
+  const role = $("mediaRole").value || "";
+  msg.textContent = `Uploading ${files.length} file(s)…`;
+  try {
+    for (const file of files) {
+      const query = `filename=${encodeURIComponent(file.name)}&role=${encodeURIComponent(role)}`;
+      await api(`/api/projects/${id}/media?${query}`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      });
+    }
+    msg.textContent = `Added ${files.length} file(s).`;
+    picker.value = "";
+    $("mediaRole").value = "";
+    await refreshMedia();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+$("mediaList").addEventListener("click", async (event) => {
+  const id = event.target && event.target.dataset ? event.target.dataset.media : "";
+  const project = $("projectSel").value;
+  if (!id || !project) return;
+  try {
+    await api(`/api/projects/${project}/media/${id}`, { method: "DELETE", headers: jsonHeaders });
+    await refreshMedia();
+  } catch (err) {
+    $("mediaMsg").textContent = err.message;
+  }
+});
+
 $("projectSel").addEventListener("change", updateGithubAppButton);
+$("projectSel").addEventListener("change", refreshMedia);
 
 $("githubAppBtn").addEventListener("click", async () => {
   const msg = $("fetchMsg");

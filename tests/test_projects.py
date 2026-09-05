@@ -54,7 +54,7 @@ def test_claim_pushes_workspace_to_seat(tmp_path: Path, monkeypatch):
         json={"title": "Use this repo", "brief": "edit it", "project_id": proj["id"]},
     ).json()
     seen = []
-    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: seen.append(path) or {"ok": True})
+    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path, media=None: seen.append(path) or {"ok": True})
     check = desk.post("/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"})
     sid = check.json()["session"]["id"]
     claimed = desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
@@ -76,7 +76,7 @@ def test_claiming_a_second_solution_on_a_busy_project_is_409(tmp_path: Path, mon
         "/api/board",
         json={"title": "Fix the footer", "brief": "edit it", "project_id": proj["id"]},
     ).json()
-    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: {"ok": True})
+    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path, media=None: {"ok": True})
 
     ada = desk.post("/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}).json()
     ada_id = ada["session"]["id"]
@@ -248,7 +248,7 @@ def test_claim_clones_a_project_that_is_not_on_disk(tmp_path: Path, monkeypatch)
     calls: list = []
     _fake_clone(monkeypatch, dest, calls)
     seen: list = []
-    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: seen.append(path) or {"ok": True})
+    monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path, media=None: seen.append(path) or {"ok": True})
 
     sid = desk.post("/api/sessions/check-in", json={"seat_id": "seat-1", "coder_name": "Ada"}).json()["session"]["id"]
     res = desk.post(f"/api/sessions/{sid}/claim", json={"board_id": brief["id"]})
