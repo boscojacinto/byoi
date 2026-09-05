@@ -407,7 +407,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         except github_app.GithubAppError as exc:
             raise HTTPException(502, str(exc)) from exc
         github_app.store_credentials(data)
-        return RedirectResponse(url="/host/", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/github/app/setup")
     def github_app_setup(
@@ -426,7 +426,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 store.set_project_installation(state, installation_id)
             except KeyError:
                 pass
-        return RedirectResponse(url="/host/", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/api/projects/{project_id}/github-app-install-url")
     def github_app_install_url(
