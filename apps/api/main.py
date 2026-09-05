@@ -24,11 +24,12 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from apps.host_token import token_is_weak, token_matches
 from apps.secrets import read_secret
 
+from . import board_suggest
 from . import caddy
 from . import deploy as deploy_ops
 from . import github_app
@@ -88,7 +89,23 @@ class BoardIn(BaseModel):
     wellness_minutes: int = Field(90, ge=15, le=240)
     break_after: int = Field(50, ge=10, le=180)
     project_id: str | None = None
-    spec: str = ""
+    # Required from the desk's "New solution" form — a solution with no
+    # acceptance spec can't be graded. A GitHub-issue import goes through
+    # Store.sync_board_issues directly, not this model, so that path is
+    # unaffected.
+    spec: str
+
+    @field_validator("spec")
+    @classmethod
+    def _spec_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Specs & QA is required")
+        return value
+
+
+class BoardSuggestIn(BaseModel):
+    title: str
+    project_id: str
 
 
 class ProjectIn(BaseModel):
@@ -98,7 +115,9 @@ class ProjectIn(BaseModel):
     url: str | None = None
     template: str | None = None
     description: str = ""
-    private: bool = True
+    # The desk's own repos are never private — the drawer no longer offers
+    # the choice, so this only matters to a caller that sets it explicitly.
+    private: bool = False
     push: bool = False
 
 
@@ -296,6 +315,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/board/suggest")
+    def post_board_suggest(
+        request: Request, body: BoardSuggestIn, authorization: str | None = Header(default=None)
+    ) -> dict:
+        """Draft a brief/spec/time-budget from a title, grounded in the
+        project's own checkout — a recommendation the host edits, not a
+        publish. See apps/api/board_suggest.py."""
+        require_operator(request, authorization)
+        project = store.project(body.project_id)
+        if not project:
+            raise HTTPException(404, "unknown project")
+        try:
+            return board_suggest.suggest_solution(title=body.title, project=project)
+        except board_suggest.BoardSuggestError as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     @app.get("/api/projects")
     def get_projects() -> dict:

@@ -135,25 +135,20 @@
         <h2>New solution</h2>
         <button type="button" class="text" id="closeAdd">Close</button>
       </div>
-      <form id="newBrief">
-        <input name="title" placeholder="Title" required />
-        <textarea name="brief" placeholder="What done looks like" required></textarea>
-        <textarea name="spec" placeholder="Specs &amp; QA — plain-English facts that must hold, one per line (optional)"></textarea>
-        <div class="row">
-          <select name="project_id" id="projectSel"><option value="">Project</option></select>
-          <button type="button" class="text" id="fetchProject">Fetch repo</button>
-          <button type="button" class="text" id="syncIssues">Sync GitHub issues</button>
-          <button type="button" class="text" id="githubAppBtn">Set up GitHub App</button>
-        </div>
-        <p id="fetchMsg" class="quiet"></p>
-        <div class="row">
-          <label>Minutes <input type="number" name="wellness_minutes" value="90" min="15" /></label>
-          <label>Break <input type="number" name="break_after" value="50" min="10" /></label>
-          <button type="submit">Add</button>
-        </div>
-      </form>
-      <details class="add">
-        <summary>New project</summary>
+
+      <div class="row" id="addModeToggle">
+        <button type="button" class="text is-on" id="modeExisting" data-mode="existing">Add to existing project</button>
+        <button type="button" class="text" id="modeNew" data-mode="new">Add to new project</button>
+      </div>
+
+      <div id="existingProjectMode">
+        <p class="eyebrow">Project</p>
+        <select id="projectSel"><option value="">Project</option></select>
+        <p id="projectSyncMsg" class="quiet"></p>
+      </div>
+
+      <div id="newProjectMode" hidden>
+        <p class="eyebrow">Project</p>
         <form id="newProject">
           <p class="row">
             <label><input type="radio" name="kind" value="template" checked /> Template</label>
@@ -166,11 +161,38 @@
           <select name="template" id="templateSelect" data-kind="template"></select>
           <input name="url" placeholder="Paste the repo's GitHub URL" data-kind="clone" />
           <input name="path" placeholder="Folder path on this server" data-kind="local" />
-          <label class="row" data-kind="github"><input type="checkbox" name="private" checked /> Private</label>
           <button type="submit">Save project</button>
-          <p id="projectMsg" class="quiet"></p>
         </form>
-      </details>
+        <p id="projectMsg" class="quiet"></p>
+      </div>
+
+      <div id="briefSection" hidden>
+        <p class="eyebrow">Solution</p>
+        <form id="newBrief">
+          <input type="hidden" name="project_id" id="briefProjectId" />
+          <input name="title" placeholder="Title" required />
+          <textarea name="brief" placeholder="What done looks like — Claude drafts this from the repo once you tab out of Title" required></textarea>
+          <textarea name="spec" placeholder="Specs &amp; QA — plain-English facts that must hold, one per line" required></textarea>
+          <p id="suggestMsg" class="quiet"></p>
+          <div class="row">
+            <label>Minutes <input type="number" name="wellness_minutes" value="90" min="15" max="240" /></label>
+            <label>Break <input type="number" name="break_after" value="50" min="10" max="180" /></label>
+            <button type="submit">Add</button>
+          </div>
+          <p id="briefMsg" class="quiet"></p>
+        </form>
+      </div>
+    </div>
+  </aside>
+
+  <aside class="modal" id="githubAppModal" hidden>
+    <div class="modal-card">
+      <div class="card-head">
+        <h2>GitHub App</h2>
+        <button type="button" class="text" id="closeGithubAppModal">Skip</button>
+      </div>
+      <p class="quiet" id="githubAppModalMsg"></p>
+      <button type="button" class="cta" id="githubAppModalAction"></button>
     </div>
   </aside>
 

@@ -32,7 +32,12 @@ def test_host_creates_local_project_and_publishes(tmp_path: Path):
     assert body["local_path"] == str(folder.resolve())
     brief = desk.post(
         "/api/board",
-        json={"title": "Ship the app", "brief": "make it run", "project_id": body["id"]},
+        json={
+            "title": "Ship the app",
+            "brief": "make it run",
+            "spec": "- it runs",
+            "project_id": body["id"],
+        },
     )
     assert brief.status_code == 200
     assert brief.json()["project"]["name"] == "cafe-app"
@@ -40,7 +45,9 @@ def test_host_creates_local_project_and_publishes(tmp_path: Path):
 
 def test_unknown_project_on_board_is_404(tmp_path: Path):
     desk = _desk(tmp_path)
-    res = desk.post("/api/board", json={"title": "x", "brief": "y", "project_id": "nope"})
+    res = desk.post(
+        "/api/board", json={"title": "x", "brief": "y", "spec": "- works", "project_id": "nope"}
+    )
     assert res.status_code == 404
 
 
@@ -51,7 +58,7 @@ def test_claim_pushes_workspace_to_seat(tmp_path: Path, monkeypatch):
     proj = desk.post("/api/projects", json={"kind": "local", "path": str(folder), "name": "work"}).json()
     brief = desk.post(
         "/api/board",
-        json={"title": "Use this repo", "brief": "edit it", "project_id": proj["id"]},
+        json={"title": "Use this repo", "brief": "edit it", "spec": "- works", "project_id": proj["id"]},
     ).json()
     seen = []
     monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: seen.append(path) or {"ok": True})
@@ -70,11 +77,11 @@ def test_claiming_a_second_solution_on_a_busy_project_is_409(tmp_path: Path, mon
     proj = desk.post("/api/projects", json={"kind": "local", "path": str(folder), "name": "work"}).json()
     first = desk.post(
         "/api/board",
-        json={"title": "Fix the header", "brief": "edit it", "project_id": proj["id"]},
+        json={"title": "Fix the header", "brief": "edit it", "spec": "- works", "project_id": proj["id"]},
     ).json()
     second = desk.post(
         "/api/board",
-        json={"title": "Fix the footer", "brief": "edit it", "project_id": proj["id"]},
+        json={"title": "Fix the footer", "brief": "edit it", "spec": "- works", "project_id": proj["id"]},
     ).json()
     monkeypatch.setattr("apps.api.seat_sync.set_workspace", lambda seat, path: {"ok": True})
 

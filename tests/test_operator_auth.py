@@ -53,11 +53,16 @@ def test_verify_without_a_hash_file_is_false(tmp_path: Path):
 
 
 def test_login_sets_a_cookie_that_opens_the_floor(desk: TestClient):
-    assert desk.post("/api/board", json={"title": "x", "brief": "y"}).status_code == 401
+    assert (
+        desk.post("/api/board", json={"title": "x", "brief": "y", "spec": "- works"}).status_code
+        == 401
+    )
     res = desk.post("/api/login", json={"password": "open-sesame"})
     assert res.status_code == 200
     assert operator.COOKIE_NAME in res.cookies
-    posted = desk.post("/api/board", json={"title": "Steam the wand", "brief": "ritual"})
+    posted = desk.post(
+        "/api/board", json={"title": "Steam the wand", "brief": "ritual", "spec": "- works"}
+    )
     assert posted.status_code == 200
 
 
@@ -66,7 +71,10 @@ def test_logout_closes_it_again(desk: TestClient):
     assert desk.get("/api/session").json()["signed_in"] is True
     desk.post("/api/logout")
     assert desk.get("/api/session").json()["signed_in"] is False
-    assert desk.post("/api/board", json={"title": "x", "brief": "y"}).status_code == 401
+    assert (
+        desk.post("/api/board", json={"title": "x", "brief": "y", "spec": "- works"}).status_code
+        == 401
+    )
 
 
 def test_wrong_password_locks_out_after_enough_tries(desk: TestClient):
@@ -82,7 +90,10 @@ def test_a_forged_cookie_is_refused(desk: TestClient):
     body, _, signature = operator.issue_cookie().partition(".")
     forged = f"{body}.{'a' * len(signature)}"
     desk.cookies.set(operator.COOKIE_NAME, forged)
-    assert desk.post("/api/board", json={"title": "x", "brief": "y"}).status_code == 401
+    assert (
+        desk.post("/api/board", json={"title": "x", "brief": "y", "spec": "- works"}).status_code
+        == 401
+    )
 
 
 def test_an_expired_cookie_is_refused():
@@ -114,7 +125,7 @@ def test_the_host_token_still_works_for_machine_callers(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
     res = client.post(
         "/api/board",
-        json={"title": "x", "brief": "y"},
+        json={"title": "x", "brief": "y", "spec": "- works"},
         headers={"Authorization": "Bearer byoi-host"},
     )
     assert res.status_code == 200

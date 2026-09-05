@@ -9,7 +9,7 @@ def _desk(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path), headers={"Authorization": "Bearer byoi-host"})
 
 
-def _session_with_project(desk: TestClient, tmp_path: Path, *, spec: str = "") -> tuple[str, dict]:
+def _session_with_project(desk: TestClient, tmp_path: Path, *, spec: str = "- works") -> tuple[str, dict]:
     proj_dir = tmp_path / "proj"
     proj_dir.mkdir(exist_ok=True)
     (proj_dir / "byoi.json").write_text('{"framework":"nextjs","needs":["auth"]}')
