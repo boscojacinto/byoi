@@ -208,6 +208,11 @@ Redeploying code is the same `rsync` from step 5 followed by `cloud-up.sh` —
 it is idempotent and rebuilds only what changed. Seats that are up at the time
 are containers the desk owns; free them from the desk first.
 
+**The rsync deletes `deploy/.env` every time.** It is gitignored, so it does
+not exist in the local source tree, and the command uses `--delete`. Re-run
+the `scp deploy/.env root@"$IP":/opt/byoi/deploy/.env` from step 5 immediately
+after every redeploy rsync, day two included — not just the first time.
+
 ## Teardown
 
 Only when the user asks. Back up first — the archive holds the salon CA key, the
@@ -234,6 +239,17 @@ handed to somebody else.
   context.** They have to be copied to the VM by hand; nothing will do it for
   you, and the failure is a container that refuses to start on a missing
   variable.
+* **The rsync in step 5 runs `--delete` against `/opt/byoi/`.** If your shell's
+  cwd has drifted — e.g. an earlier `cd .claude/skills/deploy-utho` for
+  `utho.py` left it there — `rsync ./ ... --delete` syncs *that* directory as
+  if it were the whole repo and deletes everything else on the VM that isn't
+  in it. Run `pwd` (or use an absolute source path) immediately before this
+  rsync, every time, especially right after any `cd` earlier in the same
+  session. If it happens anyway: don't panic, the running containers are
+  untouched until you restart them — `docker inspect <container> --format
+  '{{range .Config.Env}}{{println .}}{{end}}'` recovers `deploy/.env` and
+  root `.env` values straight from the live process before you rebuild
+  anything.
 * **Utho answers errors with HTTP 200** and a `status` field. `utho.py` checks
   the body; anything else talking to this API should too.
 * **The instance bills monthly, and the month is bought up front.** Powering it
